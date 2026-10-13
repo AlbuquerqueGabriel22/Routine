@@ -8,6 +8,7 @@ backend/build/
 backend/dist/
 backend/routiner-api.spec
 release/
+release-1.0.5/
 backend/cleaning.db
 backend/cleaning.db-shm
 backend/cleaning.db-wal

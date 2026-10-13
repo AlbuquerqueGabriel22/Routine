@@ -77,7 +77,7 @@ npm install
 npm run desktop:win
 ```
 
-Se o comando `python` não estiver disponível, substitua-o pelo caminho completo do Python já indicado acima. O instalador final será criado em `release\Routiner-Setup-1.0.5.exe`. Distribua esse instalador; a pessoa usuária só precisa instalá-lo e abrir **Routiner** pelo atalho criado.
+Se o comando `python` não estiver disponível, substitua-o pelo caminho completo do Python já indicado acima. O instalador final será criado em `release\Routiner-Setup-1.0.6.exe`. Também é possível [baixar o instalador para Windows 64 bits na Release v1.0.6](https://github.com/AlbuquerqueGabriel22/Routine/releases/download/v1.0.6/Routiner-Setup-1.0.6.exe). A pessoa usuária só precisa instalá-lo e abrir **Routiner** pelo atalho criado.
 
 O banco e as fotos ficam no perfil do usuário, fora da pasta de instalação: `%APPDATA%\Routiner\data\routiner.db` e `%APPDATA%\Routiner\data\uploads`. Esses dados permanecem após fechar ou atualizar o app; desinstalar o aplicativo não é necessário para iniciar a API ou criar o banco. Faça cópia de segurança dessa pasta regularmente. A base antiga da versão de desenvolvimento não é incluída no instalador; contas e dados preexistentes precisam de migração separada.
 

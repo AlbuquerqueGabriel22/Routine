@@ -1,0 +1,63 @@
+{
+  "name": "routiner-desktop",
+  "version": "1.0.5",
+  "private": true,
+  "description": "Aplicativo desktop Routiner para Windows",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "build:web": "npm --prefix frontend run build",
+    "build:api": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-api.ps1",
+    "build:desktop": "npm run build:web && npm run build:api && electron-builder --win nsis",
+    "desktop:dev": "electron .",
+    "desktop:win": "npm run build:desktop"
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "br.com.routiner.desktop",
+    "productName": "Routiner",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist/routiner-api",
+        "to": "backend/routiner-api"
+      },
+      {
+        "from": "frontend/dist",
+        "to": "frontend/dist"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/routiner.ico",
+      "artifactName": "Routiner-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Routiner"
+    }
+  },
+  "allowScripts": {
+    "electron@44.7.0": true,
+    "electron-winstaller@5.4.0": true
+  }
+}

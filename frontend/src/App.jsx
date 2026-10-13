@@ -42,13 +42,23 @@ const navItems = [
 ];
 
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: {
-      ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
-      ...options.headers,
-    },
-  });
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      ...options,
+      headers: {
+        ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+        ...options.headers,
+      },
+    });
+  } catch (cause) {
+    const error = new Error(
+      "Não foi possível conectar à API do Routiner. Confirme que o servidor Python está rodando e tente novamente.",
+      { cause },
+    );
+    error.name = "ApiConnectionError";
+    throw error;
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => null);
     const error = new Error(body?.detail || `Não foi possível completar a operação (${response.status}).`);

@@ -17,12 +17,14 @@ from typing import Annotated
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("CLEANING_DB_PATH", BASE_DIR / "cleaning.db"))
 UPLOAD_DIR = Path(os.environ.get("CLEANING_UPLOAD_DIR", BASE_DIR / "uploads"))
-AUTH_SECRET_PATH = BASE_DIR / ".auth_secret"
+AUTH_SECRET_PATH = Path(os.environ.get("ROUTINER_AUTH_SECRET_FILE", BASE_DIR / ".auth_secret"))
+STATIC_DIR = os.environ.get("ROUTINER_STATIC_DIR")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FREQUENCIES = {"Diário", "Semanal", "Quinzenal", "Mensal"}
@@ -40,6 +42,7 @@ def load_auth_secret() -> bytes:
         if len(configured) < 32:
             raise RuntimeError("ROUTINER_AUTH_SECRET deve ter pelo menos 32 caracteres.")
         return configured.encode("utf-8")
+    AUTH_SECRET_PATH.parent.mkdir(parents=True, exist_ok=True)
     try:
         descriptor = os.open(AUTH_SECRET_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
@@ -853,3 +856,7 @@ def dashboard(session: dict = Depends(current_session)):
         **dict(totals),
         "recent": [dict(row) for row in latest],
     }
+
+
+if STATIC_DIR:
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="frontend")

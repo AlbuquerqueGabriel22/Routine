@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
+  BadgeCheck,
+  Building2,
   CalendarDays,
   Check,
   CheckCircle2,
@@ -10,15 +12,19 @@ import {
   CircleAlert,
   ClipboardCheck,
   Clock3,
+  Download,
   Filter,
+  KeyRound,
   ImagePlus,
   LayoutDashboard,
   Leaf,
   LoaderCircle,
+  LogOut,
   Menu,
   MoreHorizontal,
   Pencil,
   Plus,
+  ShieldCheck,
   Search,
   Sparkles,
   Trash2,
@@ -32,6 +38,7 @@ const navItems = [
   { id: "dashboard", label: "Visão geral", icon: LayoutDashboard },
   { id: "locations", label: "Locais", icon: Leaf },
   { id: "history", label: "Histórico", icon: ClipboardCheck },
+  { id: "team", label: "Equipe", icon: Users, companyOnly: true },
 ];
 
 async function api(path, options = {}) {
@@ -44,7 +51,9 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    throw new Error(body?.detail || `Não foi possível completar a operação (${response.status}).`);
+    const error = new Error(body?.detail || `Não foi possível completar a operação (${response.status}).`);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -66,10 +75,67 @@ function initials(name = "") {
 }
 
 function App() {
+  const [account, setAccount] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [installPrompt, setInstallPrompt] = useState(null);
+
+  useEffect(() => {
+    api("/auth/me")
+      .then(setAccount)
+      .catch((error) => {
+        if (error.status !== 401) setAuthError(error.message);
+      })
+      .finally(() => setAuthLoading(false));
+  }, []);
+
+  useEffect(() => {
+    const onInstallPrompt = (event) => {
+      event.preventDefault();
+      setInstallPrompt(event);
+    };
+    const onInstalled = () => setInstallPrompt(null);
+    window.addEventListener("beforeinstallprompt", onInstallPrompt);
+    window.addEventListener("appinstalled", onInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", onInstallPrompt);
+      window.removeEventListener("appinstalled", onInstalled);
+    };
+  }, []);
+
+  async function logout() {
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } finally {
+      setAccount(null);
+    }
+  }
+
+  async function installApp() {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    await installPrompt.userChoice;
+    setInstallPrompt(null);
+  }
+
+  if (authLoading) {
+    return <div className="auth-loading"><LoaderCircle className="spin" size={24} /><span>Conectando ao Routiner…</span></div>;
+  }
+  if (!account) {
+    return <AuthPage
+      initialError={authError}
+      onAuthenticated={(nextAccount) => { setAuthError(""); setAccount(nextAccount); }}
+    />;
+  }
+  return <Workspace account={account} onLogout={logout} installPrompt={installPrompt} onInstall={installApp} />;
+}
+
+function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [page, setPage] = useState("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
+  const [team, setTeam] = useState([]);
   const [dashboard, setDashboard] = useState(null);
   const [query, setQuery] = useState("");
   const [frequencyFilter, setFrequencyFilter] = useState("");
@@ -81,25 +147,32 @@ function App() {
   const [toast, setToast] = useState("");
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
+  const isBoss = account.role === "company";
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setPageError("");
     try {
-      const [locationRows, historyRows, dashboardData] = await Promise.all([
+      const [locationRows, historyRows, dashboardData, teamRows] = await Promise.all([
         api("/locations"),
         api("/history"),
         api("/dashboard"),
+        isBoss ? api("/users") : Promise.resolve([]),
       ]);
       setLocations(locationRows);
       setHistory(historyRows);
       setDashboard(dashboardData);
+      setTeam(teamRows);
     } catch (error) {
+      if (error.status === 401) {
+        await onLogout();
+        return;
+      }
       setPageError(error.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isBoss, onLogout]);
 
   useEffect(() => {
     refresh();
@@ -154,12 +227,12 @@ function App() {
   async function saveCleaning(values, id) {
     setSaving(true);
     try {
-      await api(id ? `/history/${id}` : "/history", {
-        method: id ? "PUT" : "POST",
+      await api("/history", {
+        method: "POST",
         body: JSON.stringify(values),
       });
       setModal(null);
-      setToast(id ? "Registro atualizado." : "Limpeza registrada.");
+      setToast("Limpeza registrada.");
       await refresh();
     } catch (error) {
       setToast(error.message);
@@ -196,12 +269,12 @@ function App() {
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
         <div className="brand">
           <div className="brand-mark"><Leaf size={20} strokeWidth={2.2} /></div>
-          <div><strong>rotina</strong><span>GESTÃO DE LIMPEZA</span></div>
+            <div><strong>Routiner</strong><span>GESTÃO DE LIMPEZA</span></div>
           <button className="icon-button sidebar-close" onClick={() => setMobileNav(false)} aria-label="Fechar menu"><X size={18} /></button>
         </div>
         <div className="workspace-label">ESPAÇO DE TRABALHO</div>
         <nav className="main-nav" aria-label="Navegação principal">
-          {navItems.map(({ id, label, icon: Icon }) => (
+          {navItems.filter((item) => !item.companyOnly || isBoss).map(({ id, label, icon: Icon }) => (
             <button key={id} className={`nav-link ${page === id ? "active" : ""}`} onClick={() => navigate(id)}>
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
@@ -219,9 +292,9 @@ function App() {
             <CircleAlert size={18} strokeWidth={1.8} /><span>Sobre o app</span>
           </button>
           <div className="profile">
-            <div className="avatar">R</div>
-            <div className="profile-copy"><strong>Equipe de limpeza</strong><span>Área de trabalho</span></div>
-            <button className="icon-button profile-more" aria-label="Opções de perfil" title="Área de trabalho"><MoreHorizontal size={19} /></button>
+            <div className="avatar">{initials(account.name)}</div>
+            <div className="profile-copy"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
+            <button className="icon-button profile-more" aria-label="Sair da conta" title="Sair" onClick={onLogout}><LogOut size={17} /></button>
           </div>
         </div>
       </aside>
@@ -251,7 +324,8 @@ function App() {
               <LoaderCircle size={16} className={loading ? "spin" : ""} />
               <span>Atualizar</span>
             </button>
-            <div className="top-avatar" title="Equipe de limpeza">R</div>
+            {installPrompt && <button className="install-button" onClick={onInstall}><Download size={15} /><span>Instalar app</span></button>}
+            <div className="top-avatar" title={account.name}>{initials(account.name)}</div>
           </div>
         </header>
 
@@ -263,6 +337,7 @@ function App() {
               loading={loading}
               locations={locations}
               history={history}
+              account={account}
               onNavigate={navigate}
               onAddCleaning={(location) => setModal({ type: "cleaning", initial: location ? { location_id: location.id } : null })}
               onOpenRecord={(record) => setModal({ type: "record", item: record })}
@@ -279,6 +354,7 @@ function App() {
               setResponsible={setResponsibleFilter}
               photo={photoFilter}
               setPhoto={setPhotoFilter}
+              isBoss={isBoss}
               onAdd={() => setModal({ type: "location" })}
               onEdit={(item) => setModal({ type: "location", item })}
               onView={(item) => setModal({ type: "location-detail", item })}
@@ -294,6 +370,14 @@ function App() {
               setStatus={setStatusFilter}
               onAdd={() => setModal({ type: "cleaning" })}
               onView={(item) => setModal({ type: "record", item })}
+            />
+          )}
+          {page === "team" && isBoss && (
+            <TeamPage
+              team={team}
+              loading={loading}
+              company={account.company}
+              onAdd={() => setModal({ type: "user" })}
             />
           )}
           {page === "about" && <AboutPage />}
@@ -320,11 +404,30 @@ function App() {
           onSave={saveCleaning}
         />
       )}
+      {modal?.type === "user" && (
+        <UserForm
+          company={account.company}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onSave={async (values) => {
+            setSaving(true);
+            try {
+              const created = await api("/users", { method: "POST", body: JSON.stringify(values) });
+              setModal(null);
+              setToast(`Conta criada: ${created.login}`);
+              await refresh();
+            } catch (error) {
+              throw error;
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+      )}
       {modal?.type === "record" && (
         <RecordDialog
           item={modal.item}
           onClose={() => setModal(null)}
-          onEdit={() => setModal({ type: "cleaning", item: modal.item })}
           onDelete={() => removeItem("history", modal.item.id)}
         />
       )}
@@ -334,12 +437,142 @@ function App() {
           records={history.filter((entry) => entry.location_id === modal.item.id)}
           onClose={() => setModal(null)}
           onEdit={() => setModal({ type: "location", item: modal.item })}
+          isBoss={isBoss}
           onRegister={() => setModal({ type: "cleaning", initial: { location_id: modal.item.id } })}
           onRecord={(record) => setModal({ type: "record", item: record })}
         />
       )}
     </div>
   );
+}
+
+function AuthPage({ initialError, onAuthenticated }) {
+  const [mode, setMode] = useState("login");
+  const [role, setRole] = useState("company");
+  const [values, setValues] = useState({
+    fantasy_name: "",
+    company_handle: "",
+    email: "",
+    identifier: "",
+    password: "",
+  });
+  const [error, setError] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setError(initialError), [initialError]);
+  function change(key, value) {
+    setValues((current) => ({ ...current, [key]: value }));
+    setError("");
+  }
+  async function submit(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      if (mode === "register") {
+        const account = await api("/auth/register-company", {
+          method: "POST",
+          body: JSON.stringify({
+            fantasy_name: values.fantasy_name,
+            company_handle: values.company_handle,
+            email: values.email,
+            password: values.password,
+          }),
+        });
+        onAuthenticated(account);
+      } else {
+        const account = await api(`/auth/login-${role}`, {
+          method: "POST",
+          body: JSON.stringify({ identifier: values.identifier, password: values.password }),
+        });
+        onAuthenticated(account);
+      }
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const registration = mode === "register";
+  return (
+    <main className="auth-screen">
+      <section className="auth-card">
+        <div className="auth-brand"><span className="auth-brand-mark"><Leaf size={22} /></span><div><strong>Routiner</strong><small>GESTÃO DE LIMPEZA</small></div></div>
+        <div className="auth-heading"><span className="eyebrow">{registration ? "COMECE POR AQUI" : "BEM-VINDO DE VOLTA"}</span><h1>{registration ? "Cadastre sua empresa" : "Acesse sua rotina"}</h1><p>{registration ? "Crie o espaço da empresa e convide sua equipe." : "Entre para acompanhar as atividades da sua empresa."}</p></div>
+        {!registration && (
+          <div className="auth-role-switch" aria-label="Tipo de acesso">
+            <button type="button" className={role === "company" ? "selected" : ""} onClick={() => { setRole("company"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Building2 size={16} /> Empresa / chefe</button>
+            <button type="button" className={role === "user" ? "selected" : ""} onClick={() => { setRole("user"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Users size={16} /> Funcionário</button>
+          </div>
+        )}
+        <form className="auth-form" onSubmit={submit}>
+          {registration ? (
+            <>
+              <div className="form-field"><label htmlFor="company-fantasy">Nome fantasia</label><input id="company-fantasy" autoComplete="organization" required minLength={2} maxLength={120} placeholder="Ex.: Empresa Routine" value={values.fantasy_name} onChange={(event) => change("fantasy_name", event.target.value)} /></div>
+              <div className="form-field"><label htmlFor="company-handle">Identificador da empresa</label><div className="handle-input"><input id="company-handle" required minLength={2} maxLength={40} pattern="[A-Za-z0-9][A-Za-z0-9\-]{1,39}" placeholder="empresa" value={values.company_handle} onChange={(event) => change("company_handle", event.target.value.toLowerCase())} /><span>.routine</span></div><small className="field-hint">Este será o login exclusivo da empresa.</small></div>
+              <div className="form-field"><label htmlFor="company-email">E-mail</label><input id="company-email" type="email" autoComplete="email" required maxLength={254} placeholder="contato@empresa.com.br" value={values.email} onChange={(event) => change("email", event.target.value)} /></div>
+              <div className="form-field"><label htmlFor="company-password">Senha <span className="field-hint-inline">mínimo de 8 caracteres</span></label><input id="company-password" type="password" autoComplete="new-password" required minLength={8} maxLength={128} placeholder="Crie uma senha segura" value={values.password} onChange={(event) => change("password", event.target.value)} /></div>
+              <div className="auth-note"><ShieldCheck size={16} /><span>O cadastro cria o acesso do chefe. Ele poderá cadastrar funcionários e ver os registros da própria empresa.</span></div>
+            </>
+          ) : (
+            <>
+              <div className="form-field"><label htmlFor="login-identifier">{role === "company" ? "Login da empresa" : "Login do funcionário"}</label><input id="login-identifier" autoCapitalize="none" autoComplete="username" required maxLength={150} placeholder={role === "company" ? "empresa.routine" : "usuario.empresa.routine"} value={values.identifier} onChange={(event) => change("identifier", event.target.value.toLowerCase().trim())} /><small className="field-hint">{role === "company" ? "O identificador escolhido no cadastro da empresa." : "Formato: usuario.identificador-da-empresa.routine."}</small></div>
+              <div className="form-field"><label htmlFor="login-password">Senha</label><input id="login-password" type="password" autoComplete="current-password" required maxLength={128} placeholder="Sua senha" value={values.password} onChange={(event) => change("password", event.target.value)} /></div>
+            </>
+          )}
+          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+          <button className="button-primary auth-submit" disabled={busy}>{busy && <LoaderCircle size={16} className="spin" />}{registration ? "Criar empresa" : "Entrar"}<ArrowRight size={16} /></button>
+        </form>
+        <div className="auth-switch">{registration ? "Sua empresa já tem uma conta?" : "Ainda não tem uma empresa cadastrada?"} <button onClick={() => { setMode(registration ? "login" : "register"); setRole("company"); setError(""); }}> {registration ? "Entrar" : "Cadastrar empresa"}</button></div>
+        <div className="auth-footer">Seus dados e registros ficam separados por empresa.</div>
+      </section>
+      <aside className="auth-aside"><div className="auth-orb orb-a" /><div className="auth-orb orb-b" /><div className="auth-aside-content"><div className="auth-aside-icon"><ClipboardCheck size={25} /></div><span>ROTINA ORGANIZADA. EQUIPE ALINHADA.</span><h2>O cuidado diário,<br />em um só lugar.</h2><p>Gerencie locais, acompanhe as atividades e dê à sua equipe uma rotina mais simples e transparente.</p><div className="auth-benefit"><span><Check size={14} /></span> Um espaço seguro para cada empresa</div><div className="auth-benefit"><span><Check size={14} /></span> Registros identificados por funcionário</div></div></aside>
+    </main>
+  );
+}
+
+function TeamPage({ team, loading, company, onAdd }) {
+  return (
+    <>
+      <PageHeading eyebrow="ADMINISTRAÇÃO DA EMPRESA" title="Sua equipe" description="Gerencie as contas e acompanhe quem registrou cada atividade." action={<button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar funcionário</button>} />
+      <section className="company-summary panel"><div className="company-symbol"><Building2 size={20} /></div><div><span>EMPRESA</span><strong>{company.fantasy_name}</strong><small>Login: {company.company_handle}.routine · {company.email}</small></div><span className="admin-badge"><BadgeCheck size={14} /> Administrador</span></section>
+      <section className="panel team-panel">
+        <div className="section-head"><div><h2>Contas de funcionários</h2><p>Funcionários veem apenas os registros criados pela própria conta.</p></div><span className="result-count">{team.length}</span></div>
+        {loading && !team.length ? <LoadingState /> : team.length ? (
+          <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>CONTA</th></tr></thead><tbody>
+            {team.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td><span className="team-status"><span className="status-dot" /> Ativa</span></td></tr>)}
+          </tbody></table></div>
+        ) : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e registrar as próprias atividades." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
+      </section>
+    </>
+  );
+}
+
+function UserForm({ company, saving, onClose, onSave }) {
+  const [values, setValues] = useState({ name: "", sector: "", username: "", password: "" });
+  const [error, setError] = useState("");
+  const login = values.username ? `${values.username.toLowerCase()}.${company.company_handle}.routine` : `usuario.${company.company_handle}.routine`;
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      await onSave({ ...values, username: values.username.toLowerCase().trim() });
+    } catch (submitError) {
+      setError(submitError.message);
+    }
+  }
+  return <Modal title="Cadastrar funcionário" subtitle="NOVA CONTA DA EQUIPE" onClose={onClose}>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-field"><label htmlFor="employee-name">Nome completo <span className="required">*</span></label><input id="employee-name" autoFocus required minLength={2} maxLength={120} autoComplete="name" placeholder="Nome do funcionário" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><input id="employee-sector" required minLength={2} maxLength={80} placeholder="Ex.: Cozinha, salão, estoque" value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="employee-username">Identificador de usuário <span className="required">*</span></label><div className="handle-input"><input id="employee-username" required minLength={2} maxLength={30} pattern="[A-Za-z0-9][A-Za-z0-9\-]{1,29}" placeholder="maria" value={values.username} onChange={(event) => setValues({ ...values, username: event.target.value.toLowerCase() })} /><span>.{company.company_handle}.routine</span></div><small className="field-hint">Login completo: <code>{login}</code></small></div>
+      <div className="form-field"><label htmlFor="employee-password">Senha inicial <span className="required">*</span></label><input id="employee-password" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Mínimo de 8 caracteres" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} /><small className="field-hint">Compartilhe o login e a senha inicial com o funcionário.</small></div>
+      <div className="auth-note"><ShieldCheck size={16} /><span>O funcionário só poderá consultar os registros enviados pelo próprio login. A empresa poderá consultar todos.</span></div>
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Criar conta</button></footer>
+    </form>
+  </Modal>;
 }
 
 function PageHeading({ eyebrow, title, description, action }) {
@@ -355,13 +588,13 @@ function PageHeading({ eyebrow, title, description, action }) {
   );
 }
 
-function DashboardPage({ data, loading, locations, history, onNavigate, onAddCleaning, onOpenRecord }) {
+function DashboardPage({ data, loading, locations, history, account, onNavigate, onAddCleaning, onOpenRecord }) {
   const weekday = new Intl.DateTimeFormat("pt-BR", { weekday: "long" }).format(new Date());
   const dateLabel = new Intl.DateTimeFormat("pt-BR", { day: "numeric", month: "long", year: "numeric" }).format(new Date());
   const completion = data?.locations ? Math.round((data.completed_today / data.locations) * 100) : 0;
   return (
     <>
-      <PageHeading eyebrow={weekday} title="Bom dia, equipe." description={`Aqui está o resumo da sua rotina — ${dateLabel}.`} action={
+      <PageHeading eyebrow={weekday} title={`Olá, ${account.name.split(" ")[0]}.`} description={`Aqui está o resumo da sua rotina — ${dateLabel}.`} action={
         <button className="button-primary" onClick={() => onAddCleaning()}><Plus size={17} /> Registrar limpeza</button>
       } />
       <section className="welcome-banner">
@@ -421,11 +654,11 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
   return <article className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tint}`}><Icon size={18} /></span></div><div className="stat-number">{loading ? <span className="skeleton-number" /> : value}</div><div className="stat-hint">{hint}</div></article>;
 }
 
-function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, onAdd, onEdit, onView, onAddCleaning }) {
+function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
   const responsibleOptions = [...new Set(allLocations.map((location) => location.responsible))].sort((a, b) => a.localeCompare(b, "pt-BR"));
   return (
     <>
-      <PageHeading eyebrow="ORGANIZAÇÃO" title="Seus locais" description="Gerencie os ambientes e acompanhe a rotina de cada um." action={<button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo local</button>} />
+      <PageHeading eyebrow="ORGANIZAÇÃO" title="Locais da empresa" description={isBoss ? "Gerencie os ambientes e acompanhe a rotina de cada um." : "Consulte os ambientes da empresa e registre as atividades sob seu usuário."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo local</button>} />
       <div className="toolbar panel">
         <div className="toolbar-copy"><span className="result-count">{locations.length}</span><span>{locations.length === 1 ? "local" : "locais"}{locations.length !== allLocations.length ? ` de ${allLocations.length}` : ""}</span></div>
         <div className="toolbar-filters">
@@ -443,7 +676,7 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
                 <span className={`status-pill cover-status ${location.last_status === "Limpo" ? "status-done" : location.last_status === "Não limpo" ? "status-attention" : "status-neutral"}`}>
                   {location.last_status || "Sem registros"}
                 </span>
-                <button className="card-edit" onClick={(event) => { event.stopPropagation(); onEdit(location); }} aria-label={`Editar ${location.name}`}><Pencil size={15} /></button>
+                {isBoss && <button className="card-edit" onClick={(event) => { event.stopPropagation(); onEdit(location); }} aria-label={`Editar ${location.name}`}><Pencil size={15} /></button>}
               </div>
               <div className="location-card-body">
                 <button className="location-name-button" onClick={() => onView(location)}><h3>{location.name}</h3><ArrowUpRight size={16} /></button>
@@ -474,7 +707,7 @@ function HistoryPage({ entries, locations, loading, status, setStatus, onAdd, on
             <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{entries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
-              <td><span className="table-person"><span className="person-initial">{initials(entry.responsible)}</span>{entry.responsible}</span></td>
+              <td><span className="table-person"><span className="person-initial">{initials(entry.created_by_name || entry.responsible)}</span>{entry.created_by_name || entry.responsible}</span></td>
               <td>{formatDate(entry.cleaning_date)}</td>
               <td><span className={`status-pill ${entry.status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
               <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
@@ -500,7 +733,7 @@ function AboutPage() {
     <>
       <PageHeading eyebrow="INFORMAÇÕES" title="Sobre o Rotina" description="Uma forma simples e organizada de acompanhar os cuidados do dia a dia." />
       <section className="about-grid">
-        <article className="panel about-card about-intro"><div className="about-logo"><Leaf size={24} /></div><div className="eyebrow">CONTROLE DE LIMPEZA</div><h2>Uma rotina clara<br />para todos.</h2><p>Cadastre ambientes, defina responsáveis e frequências, e mantenha um histórico visual das atividades realizadas.</p></article>
+        <article className="panel about-card about-intro"><div className="about-logo"><Leaf size={24} /></div><div className="eyebrow">ROUTINER · CONTROLE DE LIMPEZA</div><h2>Uma rotina clara<br />para todos.</h2><p>Cadastre ambientes, defina responsáveis e frequências, e mantenha um histórico visual das atividades realizadas.</p></article>
         <article className="panel about-card"><div className="about-feature-icon sage"><LayoutDashboard size={19} /></div><h3>Visão geral</h3><p>Acompanhe os principais indicadores e as atividades mais recentes em um só lugar.</p></article>
         <article className="panel about-card"><div className="about-feature-icon blue"><Leaf size={19} /></div><h3>Gestão de locais</h3><p>Organize ambientes, responsáveis, periodicidade e fotos de referência.</p></article>
         <article className="panel about-card"><div className="about-feature-icon amber"><ClipboardCheck size={19} /></div><h3>Histórico com evidências</h3><p>Registre data, status, observações e fotos de antes e depois da limpeza.</p></article>
@@ -617,17 +850,17 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   </Modal>;
 }
 
-function RecordDialog({ item, onClose, onEdit, onDelete }) {
+function RecordDialog({ item, onClose, onDelete }) {
   return <Modal title="Detalhes do registro" subtitle="HISTÓRICO DE LIMPEZA" onClose={onClose} wide>
     <div className="record-detail">
-      <div className="record-summary"><span className="table-location-icon"><Leaf size={17} /></span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
+      <div className="record-summary"><span className="table-location-icon"><Leaf size={17} /></span><div><strong>{item.location_name}</strong><small>Registrado por: {item.created_by_name || item.responsible || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
       <div className="record-date"><CalendarDays size={17} /><span>Data da atividade</span><strong>{formatDate(item.cleaning_date)}</strong></div>
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">
         <PhotoView label="Foto antes" photo={item.photo_before} />
         <PhotoView label="Foto depois" photo={item.photo_after} />
       </div>
-      <footer className="modal-footer"><button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button><span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onEdit}><Pencil size={15} /> Editar registro</button></footer>
+      <footer className="modal-footer"><button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button><span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
 }
@@ -636,14 +869,14 @@ function PhotoView({ label, photo }) {
   return <div className="photo-view"><span className="photo-label">{label}</span>{photo ? <a href={photo} target="_blank" rel="noreferrer"><img src={photo} alt={label} /><span>Ampliar foto <ArrowUpRight size={13} /></span></a> : <div className="no-photo"><ImagePlus size={22} /><span>Sem foto</span></div>}</div>;
 }
 
-function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord }) {
+function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, isBoss }) {
   return <Modal title={item.name} subtitle="DETALHES DO LOCAL" onClose={onClose} wide>
     <div className="location-detail-content">
       {item.photo && <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />}
       <div className="detail-info-grid"><div><span>O que limpar</span><strong>{item.name}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Frequência</span><strong>{item.frequency}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
       <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
-      {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.notes || "Sem observações"}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros para este local.</div>}
-      <footer className="modal-footer"><button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar local</button><span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
+      {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
+      <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar local</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
     </div>
   </Modal>;
 }

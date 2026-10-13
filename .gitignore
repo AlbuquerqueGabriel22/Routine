@@ -6,5 +6,6 @@ frontend/dist/
 backend/cleaning.db
 backend/cleaning.db-shm
 backend/cleaning.db-wal
+backend/.auth_secret
 backend/uploads/*
 !backend/uploads/.gitkeep

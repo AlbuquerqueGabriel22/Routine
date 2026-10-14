@@ -119,6 +119,7 @@ def initialize_database():
                 name TEXT NOT NULL,
                 photo TEXT,
                 responsible TEXT NOT NULL,
+                responsible_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
                 frequency TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -150,7 +151,8 @@ def initialize_database():
                 completed_at TEXT,
                 completion_notes TEXT NOT NULL DEFAULT '',
                 photo_before TEXT,
-                photo_after TEXT
+                photo_after TEXT,
+                completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS company_notifications (
                 id TEXT PRIMARY KEY,
@@ -168,11 +170,27 @@ def initialize_database():
             conn, "locations", "company_id TEXT REFERENCES companies(id) ON DELETE CASCADE"
         )
         add_column_if_missing(
+            conn, "locations", "responsible_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
+        )
+        conn.execute(
+            """UPDATE locations
+                SET responsible_user_id = (
+                    SELECT MIN(u.id) FROM users u
+                    WHERE u.company_id = locations.company_id
+                        AND lower(trim(u.name)) = lower(trim(locations.responsible))
+                    HAVING COUNT(*) = 1
+                )
+                WHERE responsible_user_id IS NULL"""
+        )
+        add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
         add_column_if_missing(conn, "tasks", "completion_notes TEXT NOT NULL DEFAULT ''")
         add_column_if_missing(conn, "tasks", "photo_before TEXT")
         add_column_if_missing(conn, "tasks", "photo_after TEXT")
+        add_column_if_missing(
+            conn, "tasks", "completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_locations_company ON locations(company_id, name)"
         )
@@ -255,6 +273,7 @@ class LocationInput(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     photo: str | None = None
     responsible: Annotated[str, Field(min_length=1, max_length=100)]
+    responsible_user_id: str | None = None
     frequency: str
 
     @field_validator("name", "responsible")
@@ -428,11 +447,82 @@ def company_row(conn: sqlite3.Connection, company_id: str):
 
 def fetch_location(conn: sqlite3.Connection, location_id: str, company_id: str):
     row = conn.execute(
-        "SELECT * FROM locations WHERE id = ? AND company_id = ?", (location_id, company_id)
+        """SELECT l.*, u.sector AS responsible_sector
+            FROM locations l
+            LEFT JOIN users u ON u.id = l.responsible_user_id
+            WHERE l.id = ? AND l.company_id = ?""",
+        (location_id, company_id),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Local não encontrado nesta empresa.")
     return dict(row)
+
+
+def employee_location_filter(session: dict, alias: str = "l") -> tuple[str, list[str]]:
+    return (
+        f"""{alias}.responsible_user_id IN (
+            SELECT sector_user.id FROM users sector_user
+            WHERE sector_user.company_id = ?
+                AND lower(trim(sector_user.sector)) = lower(trim((
+                    SELECT own_user.sector FROM users own_user
+                    WHERE own_user.id = ? AND own_user.company_id = ?
+                )))
+        )""",
+        [session["company_id"], session["account_id"], session["company_id"]],
+    )
+
+
+def require_location_access(conn: sqlite3.Connection, location_id: str, session: dict):
+    location = fetch_location(conn, location_id, session["company_id"])
+    if session["role"] == "user" and (
+        location["responsible_user_id"] is None
+        or conn.execute(
+            """SELECT 1 FROM users responsible
+                JOIN users current_user
+                    ON current_user.company_id = responsible.company_id
+                    AND current_user.id = ?
+                WHERE responsible.id = ? AND responsible.company_id = ?
+                    AND lower(trim(responsible.sector)) = lower(trim(current_user.sector))""",
+            (
+                session["account_id"],
+                location["responsible_user_id"],
+                session["company_id"],
+            ),
+        ).fetchone()
+        is None
+    ):
+        raise HTTPException(status_code=404, detail="Local não encontrado nesta conta.")
+    return location
+
+
+def responsible_user_for_location(
+    conn: sqlite3.Connection,
+    company_id: str,
+    responsible: str,
+    responsible_user_id: str | None = None,
+):
+    if responsible_user_id:
+        row = conn.execute(
+            "SELECT id, name FROM users WHERE id = ? AND company_id = ?",
+            (responsible_user_id, company_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(
+                status_code=422,
+                detail="O responsável selecionado não pertence a esta empresa.",
+            )
+        return dict(row)
+    rows = conn.execute(
+        """SELECT id, name FROM users
+            WHERE company_id = ? AND lower(trim(name)) = lower(trim(?))""",
+        (company_id, responsible),
+    ).fetchall()
+    if len(rows) != 1:
+        raise HTTPException(
+            status_code=422,
+            detail="Selecione um funcionário cadastrado como responsável pelo local.",
+        )
+    return dict(rows[0])
 
 
 def register_identifier(account: dict) -> dict:
@@ -634,13 +724,20 @@ def list_tasks(session: dict = Depends(current_session)):
     clauses = ["t.company_id = ?"]
     params: list[str] = [session["company_id"]]
     if session["role"] == "user":
-        clauses.append("t.assigned_user_id = ?")
-        params.append(session["account_id"])
+        clauses.append(
+            """lower(trim(u.sector)) = lower(trim((
+                SELECT current_user.sector FROM users current_user
+                WHERE current_user.id = ? AND current_user.company_id = ?
+            )))"""
+        )
+        params.extend([session["account_id"], session["company_id"]])
     with connection() as conn:
         rows = conn.execute(
-            f"""SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector
+            f"""SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector,
+                    executor.name AS completed_by_name
                 FROM tasks t
                 JOIN users u ON u.id = t.assigned_user_id
+                LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(clauses)}
                 ORDER BY CASE WHEN t.completed_at IS NULL THEN 0 ELSE 1 END,
                     t.deadline ASC""",
@@ -654,7 +751,7 @@ def create_task(payload: TaskInput, session: dict = Depends(company_only)):
     task_id = str(uuid.uuid4())
     with connection() as conn:
         assignee = conn.execute(
-            "SELECT id FROM users WHERE id = ? AND company_id = ?",
+            "SELECT id, name FROM users WHERE id = ? AND company_id = ?",
             (payload.assigned_user_id, session["company_id"]),
         ).fetchone()
         if assignee is None:
@@ -674,7 +771,8 @@ def create_task(payload: TaskInput, session: dict = Depends(company_only)):
             ),
         )
         row = conn.execute(
-            """SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector
+            """SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector,
+                    NULL AS completed_by_name
                 FROM tasks t JOIN users u ON u.id = t.assigned_user_id
                 WHERE t.id = ?""",
             (task_id,),
@@ -685,26 +783,39 @@ def create_task(payload: TaskInput, session: dict = Depends(company_only)):
 @app.post("/api/tasks/{task_id}/acknowledge")
 def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
     if session["role"] != "user":
-        raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode dar ciência.")
+        raise HTTPException(status_code=403, detail="Somente funcionários podem dar ciência.")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
+        task = conn.execute(
+            """SELECT t.acknowledged_at, t.completed_at, assigned.sector AS assignee_sector,
+                    current_user.sector AS current_sector
+                FROM tasks t
+                JOIN users assigned ON assigned.id = t.assigned_user_id
+                JOIN users current_user ON current_user.id = ?
+                WHERE t.id = ? AND t.company_id = ?
+                    AND assigned.company_id = ? AND current_user.company_id = ?""",
+            (
+                session["account_id"],
+                task_id,
+                session["company_id"],
+                session["company_id"],
+                session["company_id"],
+            ),
+        ).fetchone()
+        if task is None or task["assignee_sector"].strip().casefold() != task["current_sector"].strip().casefold():
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
+        if task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+        if task["acknowledged_at"] is not None:
+            return {"id": task_id, "acknowledged_at": task["acknowledged_at"]}
         cursor = conn.execute(
             """UPDATE tasks SET acknowledged_at = ?
-                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                WHERE id = ? AND company_id = ?
                     AND acknowledged_at IS NULL AND completed_at IS NULL""",
-            (now, task_id, session["company_id"], session["account_id"]),
+            (now, task_id, session["company_id"]),
         )
         if cursor.rowcount == 0:
-            existing = conn.execute(
-                """SELECT acknowledged_at FROM tasks
-                    WHERE id = ? AND company_id = ? AND assigned_user_id = ?""",
-                (task_id, session["company_id"], session["account_id"]),
-            ).fetchone()
-            if existing is None:
-                raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
-            if existing["acknowledged_at"] is None:
-                raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
-            return {"id": task_id, "acknowledged_at": existing["acknowledged_at"]}
+            raise HTTPException(status_code=409, detail="Esta tarefa foi atualizada por outra pessoa.")
         conn.execute(
             """INSERT INTO company_notifications
                 (id, company_id, task_id, actor_user_id, event_type, created_at)
@@ -721,7 +832,7 @@ def complete_task(
     session: dict = Depends(current_session),
 ):
     if session["role"] != "user":
-        raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode concluir a tarefa.")
+        raise HTTPException(status_code=403, detail="Somente um funcionário do setor responsável pode concluir a tarefa.")
     photo_filenames = []
     for photo in (payload.photo_before, payload.photo_after):
         match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:jpg|png|webp))", photo)
@@ -730,6 +841,28 @@ def complete_task(
         photo_filenames.append(match.group(1))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
+        task = conn.execute(
+            """SELECT t.acknowledged_at, t.completed_at, assigned.sector AS assignee_sector,
+                    current_user.sector AS current_sector
+                FROM tasks t
+                JOIN users assigned ON assigned.id = t.assigned_user_id
+                JOIN users current_user ON current_user.id = ?
+                WHERE t.id = ? AND t.company_id = ?
+                    AND assigned.company_id = ? AND current_user.company_id = ?""",
+            (
+                session["account_id"],
+                task_id,
+                session["company_id"],
+                session["company_id"],
+                session["company_id"],
+            ),
+        ).fetchone()
+        if task is None or task["assignee_sector"].strip().casefold() != task["current_sector"].strip().casefold():
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
+        if task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+        if task["acknowledged_at"] is None:
+            raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
         for filename in photo_filenames:
             upload = conn.execute(
                 """SELECT 1 FROM uploads
@@ -740,30 +873,21 @@ def complete_task(
                 raise HTTPException(status_code=403, detail="Uma das fotos não pertence a esta conta.")
         cursor = conn.execute(
             """UPDATE tasks SET completed_at = ?, completion_notes = ?,
-                    photo_before = ?, photo_after = ?
-                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                    photo_before = ?, photo_after = ?, completed_by_user_id = ?
+                WHERE id = ? AND company_id = ?
                     AND acknowledged_at IS NOT NULL AND completed_at IS NULL""",
             (
                 now,
                 payload.notes,
                 payload.photo_before,
                 payload.photo_after,
+                session["account_id"],
                 task_id,
                 session["company_id"],
-                session["account_id"],
             ),
         )
         if cursor.rowcount == 0:
-            existing = conn.execute(
-                """SELECT acknowledged_at, completed_at FROM tasks
-                    WHERE id = ? AND company_id = ? AND assigned_user_id = ?""",
-                (task_id, session["company_id"], session["account_id"]),
-            ).fetchone()
-            if existing is None:
-                raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
-            if existing["completed_at"] is not None:
-                raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
-            raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
+            raise HTTPException(status_code=409, detail="Esta tarefa foi concluída por outra pessoa.")
         conn.execute(
             """INSERT INTO company_notifications
                 (id, company_id, task_id, actor_user_id, event_type, created_at)
@@ -779,9 +903,11 @@ def list_company_notifications(session: dict = Depends(company_only)):
         rows = conn.execute(
             """SELECT n.id, n.task_id, n.event_type, n.created_at, n.read_at,
                     t.title AS task_title, t.deadline,
+                    assigned.name AS assignee_name,
                     u.name AS actor_name, u.sector AS actor_sector
                 FROM company_notifications n
                 JOIN tasks t ON t.id = n.task_id
+                JOIN users assigned ON assigned.id = t.assigned_user_id
                 LEFT JOIN users u ON u.id = n.actor_user_id
                 WHERE n.company_id = ?
                 ORDER BY n.created_at DESC, n.rowid DESC LIMIT 100""",
@@ -847,10 +973,79 @@ def get_upload(filename: str, session: dict = Depends(current_session)):
         ).fetchone()
         if upload is None or upload["company_id"] != session["company_id"]:
             raise HTTPException(status_code=404, detail="Imagem não encontrada.")
-        if session["role"] == "user" and upload["owner_user_id"] != session["account_id"]:
+        if session["role"] == "user":
             shared_location_photo = conn.execute(
-                "SELECT 1 FROM locations WHERE company_id = ? AND photo = ? LIMIT 1",
-                (session["company_id"], f"/uploads/{filename}"),
+                """SELECT 1 FROM locations l
+                    WHERE l.company_id = ? AND l.photo = ?
+                        AND l.responsible_user_id IN (
+                            SELECT sector_user.id FROM users sector_user
+                            WHERE sector_user.company_id = ?
+                                AND lower(trim(sector_user.sector)) = lower(trim((
+                                    SELECT own_user.sector FROM users own_user
+                                    WHERE own_user.id = ? AND own_user.company_id = ?
+                                )))
+                        )
+                    UNION ALL
+                    SELECT 1 FROM cleanings c
+                    JOIN locations l ON l.id = c.location_id
+                    WHERE l.company_id = ?
+                        AND (c.photo_before = ? OR c.photo_after = ?)
+                        AND l.responsible_user_id IN (
+                            SELECT sector_user.id FROM users sector_user
+                            WHERE sector_user.company_id = ?
+                                AND lower(trim(sector_user.sector)) = lower(trim((
+                                    SELECT own_user.sector FROM users own_user
+                                    WHERE own_user.id = ? AND own_user.company_id = ?
+                                )))
+                        )
+                    UNION ALL
+                    SELECT 1 FROM tasks t
+                    JOIN users assigned ON assigned.id = t.assigned_user_id
+                    WHERE t.company_id = ? AND (t.photo_before = ? OR t.photo_after = ?)
+                        AND lower(trim(assigned.sector)) = lower(trim((
+                            SELECT own_user.sector FROM users own_user
+                            WHERE own_user.id = ? AND own_user.company_id = ?
+                        )))
+                    UNION ALL
+                    SELECT 1 FROM uploads uploaded
+                    WHERE uploaded.filename = ? AND uploaded.owner_user_id = ?
+                        AND NOT EXISTS (
+                            SELECT 1 FROM locations WHERE photo = ?
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM cleanings
+                            WHERE photo_before = ? OR photo_after = ?
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM tasks
+                            WHERE photo_before = ? OR photo_after = ?
+                        )
+                    LIMIT 1""",
+                (
+                    session["company_id"],
+                    f"/uploads/{filename}",
+                    session["company_id"],
+                    session["account_id"],
+                    session["company_id"],
+                    session["company_id"],
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                    session["company_id"],
+                    session["account_id"],
+                    session["company_id"],
+                    session["company_id"],
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                    session["account_id"],
+                    session["company_id"],
+                    filename,
+                    session["account_id"],
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                    f"/uploads/{filename}",
+                ),
             ).fetchone()
             if shared_location_photo is None:
                 raise HTTPException(status_code=404, detail="Imagem não encontrada.")
@@ -870,6 +1065,10 @@ def list_locations(
 ):
     clauses = ["l.company_id = ?"]
     params: list[str] = [session["company_id"]]
+    if session["role"] == "user":
+        sector_filter, sector_params = employee_location_filter(session)
+        clauses.append(sector_filter)
+        params.extend(sector_params)
     if search.strip():
         clauses.append("(l.name LIKE ? OR l.responsible LIKE ?)")
         params.extend([f"%{search.strip()}%", f"%{search.strip()}%"])
@@ -885,24 +1084,21 @@ def list_locations(
         clauses.append("(l.photo IS NULL OR l.photo = '')")
     elif photo:
         raise HTTPException(status_code=422, detail="Filtro de foto inválido.")
-    history_scope = ""
-    subquery_params: list[str] = []
-    if session["role"] == "user":
-        history_scope = " AND c.created_by_user_id = ?"
-        subquery_params = [session["account_id"]] * 3
     with connection() as conn:
         rows = conn.execute(
             f"""
-            SELECT l.*,
-                (SELECT COUNT(*) FROM cleanings c WHERE c.location_id = l.id{history_scope}) AS cleaning_count,
-                (SELECT c.cleaning_date FROM cleanings c WHERE c.location_id = l.id{history_scope}
+            SELECT l.*, owner.sector AS responsible_sector,
+                (SELECT COUNT(*) FROM cleanings c WHERE c.location_id = l.id) AS cleaning_count,
+                (SELECT c.cleaning_date FROM cleanings c WHERE c.location_id = l.id
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_cleaned,
-                (SELECT c.status FROM cleanings c WHERE c.location_id = l.id{history_scope}
+                (SELECT c.status FROM cleanings c WHERE c.location_id = l.id
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_status
-            FROM locations l WHERE {' AND '.join(clauses)}
+            FROM locations l
+            LEFT JOIN users owner ON owner.id = l.responsible_user_id
+            WHERE {' AND '.join(clauses)}
             ORDER BY l.name COLLATE NOCASE
             """,
-            [*subquery_params, *params],
+            params,
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -912,16 +1108,23 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
     validate_frequency(payload.frequency)
     location_id = str(uuid.uuid4())
     with connection() as conn:
+        responsible = responsible_user_for_location(
+            conn,
+            session["company_id"],
+            payload.responsible,
+            payload.responsible_user_id,
+        )
         conn.execute(
             """INSERT INTO locations
-                (id, company_id, name, photo, responsible, frequency, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (id, company_id, name, photo, responsible, responsible_user_id, frequency, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 location_id,
                 session["company_id"],
                 payload.name,
                 payload.photo,
-                payload.responsible,
+                responsible["name"],
+                responsible["id"],
                 payload.frequency,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
@@ -932,7 +1135,7 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
 @app.get("/api/locations/{location_id}")
 def get_location(location_id: str, session: dict = Depends(current_session)):
     with connection() as conn:
-        return fetch_location(conn, location_id, session["company_id"])
+        return require_location_access(conn, location_id, session)
 
 
 @app.put("/api/locations/{location_id}")
@@ -944,13 +1147,21 @@ def update_location(
     validate_frequency(payload.frequency)
     with connection() as conn:
         fetch_location(conn, location_id, session["company_id"])
+        responsible = responsible_user_for_location(
+            conn,
+            session["company_id"],
+            payload.responsible,
+            payload.responsible_user_id,
+        )
         conn.execute(
-            """UPDATE locations SET name = ?, photo = ?, responsible = ?, frequency = ?
+            """UPDATE locations SET name = ?, photo = ?, responsible = ?,
+                    responsible_user_id = ?, frequency = ?
                 WHERE id = ? AND company_id = ?""",
             (
                 payload.name,
                 payload.photo,
-                payload.responsible,
+                responsible["name"],
+                responsible["id"],
                 payload.frequency,
                 location_id,
                 session["company_id"],
@@ -981,8 +1192,9 @@ def list_history(
     clauses = ["l.company_id = ?"]
     params: list[str] = [session["company_id"]]
     if session["role"] == "user":
-        clauses.append("c.created_by_user_id = ?")
-        params.append(session["account_id"])
+        sector_filter, sector_params = employee_location_filter(session)
+        clauses.append(sector_filter)
+        params.extend(sector_params)
     if location_id:
         clauses.append("c.location_id = ?")
         params.append(location_id)
@@ -1005,7 +1217,8 @@ def list_history(
         rows = conn.execute(
             f"""
             SELECT c.*, l.name AS location_name, l.responsible,
-                COALESCE(u.name, co.fantasy_name) AS created_by_name
+                COALESCE(u.name, co.fantasy_name) AS created_by_name,
+                u.name AS executor_name
             FROM cleanings c
             JOIN locations l ON l.id = c.location_id
             JOIN companies co ON co.id = l.company_id
@@ -1019,12 +1232,19 @@ def list_history(
         task_clauses = ["t.company_id = ?", "t.completed_at IS NOT NULL"]
         task_params: list[str] = [session["company_id"]]
         if session["role"] == "user":
-            task_clauses.append("t.assigned_user_id = ?")
-            task_params.append(session["account_id"])
+            task_clauses.append(
+                """lower(trim(assigned.sector)) = lower(trim((
+                    SELECT current_user.sector FROM users current_user
+                    WHERE current_user.id = ? AND current_user.company_id = ?
+                )))"""
+            )
+            task_params.extend([session["account_id"], session["company_id"]])
         if status and status != "Concluída":
             task_clauses.append("0 = 1")
         if search.strip():
-            task_clauses.append("(t.title LIKE ? OR t.description LIKE ? OR u.name LIKE ? OR u.sector LIKE ?)")
+            task_clauses.append(
+                "(t.title LIKE ? OR t.description LIKE ? OR assigned.name LIKE ? OR executor.name LIKE ?)"
+            )
             task_params.extend([f"%{search.strip()}%"] * 4)
         if date_from:
             task_clauses.append("substr(t.completed_at, 1, 10) >= ?")
@@ -1033,15 +1253,18 @@ def list_history(
             task_clauses.append("substr(t.completed_at, 1, 10) <= ?")
             task_params.append(date_to)
         task_rows = conn.execute(
-            f"""SELECT             'task-' || t.id AS id, t.id AS task_id, 'task' AS record_type,
+            f"""SELECT 'task-' || t.id AS id, t.id AS task_id, 'task' AS record_type,
                     substr(t.completed_at, 1, 10) AS cleaning_date,
                     t.completed_at AS completed_at,
                     'Concluída' AS status, t.photo_before, t.photo_after,
                     t.completion_notes AS notes, t.completed_at AS created_at,
-                    t.title AS location_name, u.sector AS responsible,
-                    u.name AS created_by_name
+                    t.title AS location_name, assigned.name AS responsible,
+                    assigned.sector AS responsible_sector,
+                    executor.name AS executor_name,
+                    executor.name AS created_by_name
                 FROM tasks t
-                JOIN users u ON u.id = t.assigned_user_id
+                JOIN users assigned ON assigned.id = t.assigned_user_id
+                LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(task_clauses)}
                 ORDER BY t.completed_at DESC""",
             task_params,
@@ -1058,7 +1281,7 @@ def create_cleaning(payload: CleaningInput, session: dict = Depends(current_sess
     validate_status(payload.status)
     cleaning_id = str(uuid.uuid4())
     with connection() as conn:
-        fetch_location(conn, payload.location_id, session["company_id"])
+        require_location_access(conn, payload.location_id, session)
         conn.execute(
             """INSERT INTO cleanings
                 (id, location_id, cleaning_date, status, photo_before, photo_after, notes,
@@ -1078,7 +1301,8 @@ def create_cleaning(payload: CleaningInput, session: dict = Depends(current_sess
         )
         row = conn.execute(
             """SELECT c.*, l.name AS location_name, l.responsible,
-                    COALESCE(u.name, co.fantasy_name) AS created_by_name
+                    COALESCE(u.name, co.fantasy_name) AS created_by_name,
+                    u.name AS executor_name
                 FROM cleanings c
                 JOIN locations l ON l.id = c.location_id
                 JOIN companies co ON co.id = l.company_id
@@ -1095,6 +1319,15 @@ def delete_cleaning(cleaning_id: str, session: dict = Depends(current_session)):
         clauses = ["location_id IN (SELECT id FROM locations WHERE company_id = ?)"]
         params: list[str] = [session["company_id"]]
         if session["role"] == "user":
+            sector_filter, sector_params = employee_location_filter(session, "scoped_location")
+            clauses.append(
+                """location_id IN (
+                    SELECT scoped_location.id FROM locations scoped_location
+                    WHERE """
+                + sector_filter
+                + ")"
+            )
+            params.extend(sector_params)
             clauses.append("created_by_user_id = ?")
             params.append(session["account_id"])
         cursor = conn.execute(
@@ -1108,14 +1341,16 @@ def delete_cleaning(cleaning_id: str, session: dict = Depends(current_session)):
 @app.get("/api/dashboard")
 def dashboard(session: dict = Depends(current_session)):
     today = date.today().isoformat()
-    history_scope = ""
-    scope_params: list[str] = []
+    location_scope = ""
+    location_scope_params: list[str] = []
     if session["role"] == "user":
-        history_scope = " AND c.created_by_user_id = ?"
-        scope_params = [session["account_id"]]
+        sector_filter, location_scope_params = employee_location_filter(session)
+        location_scope = f" AND {sector_filter}"
     with connection() as conn:
         location_count = conn.execute(
-            "SELECT COUNT(*) FROM locations WHERE company_id = ?", (session["company_id"],)
+            f"""SELECT COUNT(*) FROM locations l
+                WHERE l.company_id = ?{location_scope}""",
+            [session["company_id"], *location_scope_params],
         ).fetchone()[0]
         totals = conn.execute(
             f"""SELECT
@@ -1123,8 +1358,8 @@ def dashboard(session: dict = Depends(current_session)):
                 COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status = 'Limpo' THEN 1 ELSE 0 END), 0) AS completed_today,
                 COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status = 'Não limpo' THEN 1 ELSE 0 END), 0) AS attention_today
                 FROM cleanings c JOIN locations l ON l.id = c.location_id
-                WHERE l.company_id = ?{history_scope}""",
-            [today, today, session["company_id"], *scope_params],
+                WHERE l.company_id = ?{location_scope}""",
+            [today, today, session["company_id"], *location_scope_params],
         ).fetchone()
         latest = conn.execute(
             f"""SELECT c.id, c.cleaning_date, c.status, c.notes,
@@ -1134,9 +1369,9 @@ def dashboard(session: dict = Depends(current_session)):
                 JOIN locations l ON l.id = c.location_id
                 JOIN companies co ON co.id = l.company_id
                 LEFT JOIN users u ON u.id = c.created_by_user_id
-                WHERE l.company_id = ?{history_scope}
+                WHERE l.company_id = ?{location_scope}
                 ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 6""",
-            [session["company_id"], *scope_params],
+            [session["company_id"], *location_scope_params],
         ).fetchall()
     return {
         "locations": location_count,

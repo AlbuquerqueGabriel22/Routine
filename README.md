@@ -7,8 +7,8 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Cadastro de empresas com nome fantasia, identificador, e-mail e senha.
 - Cadastro de funcionários pela empresa, com setor, identificador e senha.
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
-- Visão separada por empresa: o chefe vê os dados e a equipe da própria empresa; cada funcionário consulta os próprios registros.
-- Cadastro e manutenção de locais pela empresa; funcionários podem consultá-los e registrar atividades.
+- Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado.
+- Funcionários do mesmo setor podem dar ciência e executar tarefas atribuídas uns aos outros; no histórico ficam separados o responsável original e quem realizou a execução.
 - Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
 - Alertas visuais de prazo ficam mais urgentes conforme a data se aproxima. A empresa recebe no sino os registros de ciência e conclusão, com funcionário, setor, tarefa e prazo.
 - O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. As conclusões aparecem no histórico.

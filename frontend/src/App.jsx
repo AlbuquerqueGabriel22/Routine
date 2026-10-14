@@ -316,7 +316,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   }), [locations, query, frequencyFilter, responsibleFilter, photoFilter]);
 
   const visibleHistory = useMemo(() => history.filter((entry) => {
-    const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
+    const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.executor_name || ""} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
     return matchesQuery && (!statusFilter || entry.status === statusFilter);
   }), [history, query, statusFilter]);
 
@@ -540,7 +540,9 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
                         </span>
                         <div className="notification-copy">
                           <strong>{notification.event_type === "completed" ? "Tarefa concluída" : "Ciência registrada"}</strong>
-                          <p>{notification.actor_name || "Funcionário"} · setor {notification.actor_sector || "—"} {notification.event_type === "completed" ? "concluiu" : "deu ciência de"} “{notification.task_title}” · prazo {formatDeadline(notification.deadline)}</p>
+                          <p>{notification.event_type === "completed"
+                            ? `Responsável ${notification.assignee_name || "—"} · execução ${notification.actor_name || "Funcionário"} · setor ${notification.actor_sector || "—"} concluiu “${notification.task_title}”`
+                            : `${notification.actor_name || "Funcionário"} · setor ${notification.actor_sector || "—"} deu ciência da tarefa de ${notification.assignee_name || "—"} “${notification.task_title}”`} · prazo {formatDeadline(notification.deadline)}</p>
                           <small>{formatDeadline(notification.created_at)}</small>
                         </div>
                         {!notification.read_at && <button className="notification-read" onClick={() => readNotification(notification)}>Marcar como lida</button>}
@@ -609,7 +611,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           )}
           {page === "tasks" && (
             <TasksPage
-              tasks={tasks.filter((task) => `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector}`.toLowerCase().includes(query.toLowerCase()))}
+              tasks={tasks.filter((task) => `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector} ${task.completed_by_name || ""}`.toLowerCase().includes(query.toLowerCase()))}
               loading={loading}
               isBoss={isBoss}
               now={taskNow}
@@ -641,6 +643,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "location" && (
         <LocationForm
           item={modal.item}
+          team={team}
           saving={saving}
           onClose={() => setModal(null)}
           onSave={saveLocation}
@@ -835,7 +838,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
         title="Tarefas com prazo"
         description={isBoss
           ? "Atribua tarefas, acompanhe a ciência da equipe e confira as conclusões."
-          : "Acompanhe os prazos das tarefas atribuídas a você."}
+          : "Acompanhe as tarefas do seu setor e registre execuções em apoio à equipe."}
         action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
       />
       {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at) && (
@@ -857,7 +860,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
                     {task.description && <p className="task-description">{task.description}</p>}
                     <div className="task-meta">
                       <span><Clock3 size={14} />{deadlineCountdown(task.deadline, now)} · {formatDeadline(task.deadline)}</span>
-                      <span><Users size={14} />{isBoss ? `${task.assignee_name} · ${task.assignee_sector}` : task.assignee_sector}</span>
+                      <span><Users size={14} />Responsável: {task.assignee_name} · {task.assignee_sector}</span>
                     </div>
                   </div>
                   {!isBoss && task.acknowledged_at && (
@@ -882,7 +885,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
                   <div className="task-title-row"><h3>{task.title}</h3><span className="status-pill status-done">Concluída</span></div>
                   <div className="task-meta">
                     <span><CalendarDays size={14} />Prazo: {formatDeadline(task.deadline)}</span>
-                    <span><Users size={14} />{isBoss ? `${task.assignee_name} · ${task.assignee_sector}` : task.assignee_sector}</span>
+                    <span><Users size={14} />Responsável: {task.assignee_name} · {task.assignee_sector}{task.completed_by_name ? ` · Execução: ${task.completed_by_name}` : ""}</span>
                   </div>
                 </div>
               </article>
@@ -1068,11 +1071,11 @@ function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
         <div className="acknowledgment-symbol"><CircleAlert size={24} /></div>
         <div className="eyebrow">TAREFA COM PRAZO</div>
         <h2 id="acknowledgment-title">Confirme que você viu</h2>
-        <p className="acknowledgment-intro">A empresa atribuiu uma tarefa a você. Para continuar usando o aplicativo, confirme que tomou ciência do prazo.</p>
+        <p className="acknowledgment-intro">Confirme que você viu o prazo desta tarefa do seu setor. Sua ciência será registrada pela sua conta.</p>
         <div className={`acknowledgment-task ${deadlineUrgency(task.deadline, now)}`}>
           <strong>{task.title}</strong>
           {task.description && <p>{task.description}</p>}
-          <span>{task.assignee_sector} · prazo {formatDeadline(task.deadline)}</span>
+          <span>Responsável: {task.assignee_name} · setor {task.assignee_sector} · prazo {formatDeadline(task.deadline)}</span>
           <b><CircleAlert size={15} />{deadlineCountdown(task.deadline, now)}</b>
         </div>
         {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -1240,7 +1243,7 @@ function HistoryPage({ entries, locations, loading, status, setStatus, onAdd, on
             <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{entries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
-              <td><span className="table-person"><span className="person-initial">{initials(entry.created_by_name || entry.responsible)}</span>{entry.created_by_name || entry.responsible}</span></td>
+              <td><span className="history-parties"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span><small>Execução: {entry.executor_name || entry.created_by_name || "—"}</small></span></td>
               <td>{entry.record_type === "task" ? formatDate(entry.completed_at) : formatDate(entry.cleaning_date)}</td>
               <td><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
               <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
@@ -1321,25 +1324,26 @@ function ImageField({ label, value, onChange }) {
   </label>{uploadError && <span className="field-error">{uploadError}</span>}</div>;
 }
 
-function LocationForm({ item, saving, onClose, onSave, onDelete }) {
-  const [values, setValues] = useState({ name: item?.name || "", responsible: item?.responsible || "", frequency: item?.frequency || "", photo: item?.photo || "" });
+function LocationForm({ item, team, saving, onClose, onSave, onDelete }) {
+  const [values, setValues] = useState({ name: item?.name || "", responsible: item?.responsible || "", responsible_user_id: item?.responsible_user_id || "", frequency: item?.frequency || "", photo: item?.photo || "" });
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   async function submit(event) {
     event.preventDefault();
-    if (!values.name.trim() || !values.responsible.trim() || !values.frequency) {
+    const responsible = team.find((member) => member.id === values.responsible_user_id);
+    if (!values.name.trim() || !responsible || !values.frequency) {
       setError("Preencha o nome do local, responsável e frequência.");
       return;
     }
     setError("");
-    await onSave({ ...values, name: values.name.trim(), responsible: values.responsible.trim() }, item?.id);
+    await onSave({ ...values, name: values.name.trim(), responsible: responsible.name }, item?.id);
   }
   return <Modal title={item ? "Editar local" : "Novo local"} subtitle="CADASTRO DE AMBIENTE" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} />
       <div className="form-field"><label htmlFor="location-name">O que limpar <span className="required">*</span></label><input id="location-name" autoFocus maxLength={100} placeholder="Ex.: Bancada da cozinha" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-row">
-        <div className="form-field"><label htmlFor="location-responsible">Responsável <span className="required">*</span></label><input id="location-responsible" maxLength={100} placeholder="Nome do responsável" value={values.responsible} onChange={(event) => change("responsible", event.target.value)} /></div>
+        <div className="form-field"><label htmlFor="location-responsible">Responsável e setor <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select></div>
         <div className="form-field"><label htmlFor="location-frequency">Frequência <span className="required">*</span></label><select id="location-frequency" value={values.frequency} onChange={(event) => change("frequency", event.target.value)}><option value="">Selecione</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select></div>
       </div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -1386,7 +1390,7 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
 function RecordDialog({ item, onClose, onDelete }) {
   return <Modal title={item.record_type === "task" ? "Detalhes da tarefa" : "Detalhes do registro"} subtitle={item.record_type === "task" ? "HISTÓRICO DE TAREFAS" : "HISTÓRICO DE LIMPEZA"} onClose={onClose} wide>
     <div className="record-detail">
-      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>{item.record_type === "task" ? `Concluída por: ${item.created_by_name || "—"} · setor ${item.responsible || "—"}` : `Registrado por: ${item.created_by_name || item.responsible || "—"}`}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
+      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>{item.record_type === "task" ? `Responsável: ${item.responsible || "—"} · Execução: ${item.executor_name || "—"} · setor ${item.responsible_sector || "—"}` : `Responsável: ${item.responsible || "—"} · Execução: ${item.executor_name || item.created_by_name || "—"}`}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
       <div className="record-date"><CalendarDays size={17} /><span>{item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDate(item.record_type === "task" ? item.completed_at : item.cleaning_date)}</strong></div>
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">

@@ -437,6 +437,8 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .task-meta { display: flex; flex-wrap: wrap; gap: 6px 15px; margin-top: 9px; color: #89968e; font-size: 9px; }
 .task-meta span { display: inline-flex; align-items: center; gap: 5px; }.task-meta svg { color: #90a096; }
 .task-complete { min-height: 35px; padding: 0 10px; font-size: 9px; }
+.history-parties { display: grid; gap: 4px; }
+.history-parties > small { padding-left: 27px; color: #929d96; font-size: 9px; white-space: nowrap; }
 .task-card-complete { opacity: .8; }
 .task-empty { min-height: 210px; }
 .completed-tasks { margin-top: 28px; }
@@ -547,6 +549,7 @@ html[data-theme="dark"] .field-hint,
 html[data-theme="dark"] .activity-main small,
 html[data-theme="dark"] .empty-state p,
 html[data-theme="dark"] .record-summary small { color: #a0ada4; }
+html[data-theme="dark"] .history-parties > small { color: #a0ada4; }
 html[data-theme="dark"] .modal-form input,
 html[data-theme="dark"] .modal-form select,
 html[data-theme="dark"] .modal-form textarea { color-scheme: dark; }
@@ -611,6 +614,7 @@ html[data-theme="dark"] .modal-form textarea { color-scheme: dark; }
   html[data-theme="system"] .activity-main small,
   html[data-theme="system"] .empty-state p,
   html[data-theme="system"] .record-summary small { color: #a0ada4; }
+  html[data-theme="system"] .history-parties > small { color: #a0ada4; }
   html[data-theme="system"] .modal-form input,
   html[data-theme="system"] .modal-form select,
   html[data-theme="system"] .modal-form textarea { color-scheme: dark; }

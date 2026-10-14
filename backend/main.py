@@ -592,6 +592,7 @@ def register_identifier(account: dict) -> dict:
     result = {"role": account["role"], "name": account["name"], "login": account["login"]}
     result["company"] = account["company"]
     if account["role"] == "user":
+        result["account_id"] = account["account_id"]
         result["sector"] = account["sector"]
     return result
 
@@ -720,6 +721,7 @@ def get_current_account(session: dict = Depends(current_session)):
                 raise HTTPException(status_code=401, detail="Esta conta de usuário não existe mais.")
             result = {
                 "role": "user",
+                "account_id": session["account_id"],
                 "name": user["name"],
                 "sector": user["sector"],
                 "login": f'{user["username"]}.{company["company_handle"]}.routine',
@@ -1066,7 +1068,8 @@ def complete_task(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
         task = conn.execute(
-            """SELECT t.acknowledged_at, t.completed_at, assigned.sector AS assignee_sector,
+            """SELECT t.assigned_user_id, t.acknowledged_at, t.completed_at,
+                    assigned.sector AS assignee_sector,
                     current_user.sector AS current_sector
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
@@ -1087,6 +1090,11 @@ def complete_task(
             raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
         if task["acknowledged_at"] is None:
             raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
+        if task["assigned_user_id"] != session["account_id"] and not payload.notes:
+            raise HTTPException(
+                status_code=422,
+                detail="Informe o motivo de outro funcionário executar esta tarefa.",
+            )
         for filename in photo_filenames:
             upload = conn.execute(
                 """SELECT 1 FROM uploads
@@ -1441,11 +1449,13 @@ def list_history(
         rows = conn.execute(
             f"""
             SELECT c.*, l.name AS location_name, l.responsible,
+                owner.sector AS responsible_sector,
                 COALESCE(u.name, co.fantasy_name) AS created_by_name,
                 u.name AS executor_name
             FROM cleanings c
             JOIN locations l ON l.id = c.location_id
             JOIN companies co ON co.id = l.company_id
+            LEFT JOIN users owner ON owner.id = l.responsible_user_id
             LEFT JOIN users u ON u.id = c.created_by_user_id
             WHERE {' AND '.join(clauses)}
                 AND (? != 'Concluída')

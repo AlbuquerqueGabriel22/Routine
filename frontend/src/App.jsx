@@ -42,6 +42,8 @@ import {
 
 const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
 const STATUSES = ["Limpo", "Não limpo"];
+const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase("pt-BR")
+  === String(right || "").trim().toLocaleLowerCase("pt-BR");
 const navItems = [
   { id: "dashboard", label: "Visão geral", icon: LayoutDashboard },
   { id: "tasks", label: "Tarefas", icon: ListChecks },
@@ -609,6 +611,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
             <HistoryPage
               entries={visibleHistory}
               locations={locations}
+              sectors={sectors}
+              isBoss={isBoss}
               loading={loading}
               status={statusFilter}
               setStatus={setStatusFilter}
@@ -621,6 +625,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               tasks={tasks.filter((task) => `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector} ${task.completed_by_name || ""}`.toLowerCase().includes(query.toLowerCase()))}
               loading={loading}
               isBoss={isBoss}
+              sectors={sectors}
               now={taskNow}
               onCreate={() => setModal({ type: "task" })}
               onEdit={(task) => setModal({ type: "task", item: task })}
@@ -684,6 +689,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "task-execution" && (
         <TaskExecutionForm
           task={modal.item}
+          isSubstitute={modal.item.assigned_user_id !== account.account_id}
           saving={saving}
           onClose={() => setModal(null)}
           onSave={(completion) => completeTask(modal.item, completion)}
@@ -890,9 +896,11 @@ function TeamPage({ team, loading, company, tasks, onManageSectors, onAdd, onEdi
   );
 }
 
-function TasksPage({ tasks, loading, isBoss, now, onCreate, onEdit, onComplete }) {
-  const pending = tasks.filter((task) => !task.completed_at);
-  const completed = tasks.filter((task) => task.completed_at);
+function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onComplete }) {
+  const [sector, setSector] = useState("");
+  const sectorTasks = tasks.filter((task) => !isBoss || !sector || sameSector(task.assignee_sector, sector));
+  const pending = sectorTasks.filter((task) => !task.completed_at);
+  const completed = sectorTasks.filter((task) => task.completed_at);
   return (
     <>
       <PageHeading
@@ -903,6 +911,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onEdit, onComplete }
           : "Acompanhe as tarefas do seu setor e registre execuções em apoio à equipe."}
         action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
       />
+      {isBoss && <div className="toolbar panel"><div className="toolbar-copy"><span className="result-count">{sectorTasks.length}</span><span>{sectorTasks.length === 1 ? "tarefa" : "tarefas"}</span></div><div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div></div>}
       {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at) && (
         <div className="task-reminder"><CircleAlert size={17} /> Você tem uma tarefa que precisa de ciência. Confirme o aviso para continuar.</div>
       )}
@@ -948,7 +957,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onEdit, onComplete }
                   <div className="task-title-row"><h3>{task.title}</h3><span className="status-pill status-done">Concluída</span></div>
                   <div className="task-meta">
                     <span><CalendarDays size={14} />Prazo: {formatDeadline(task.deadline)}</span>
-                    <span><Users size={14} />Responsável: {task.assignee_name} · {task.assignee_sector}{task.completed_by_name ? ` · Execução: ${task.completed_by_name}` : ""}</span>
+                    <span><Users size={14} />Responsável: {task.assignee_name}{task.completed_by_name ? ` · Execução: ${task.completed_by_name}` : ""}</span>
                   </div>
                 </div>
               </article>
@@ -1035,13 +1044,17 @@ function AppearanceSettings({ appearance, onChange, onClose }) {
   </Modal>;
 }
 
-function TaskExecutionForm({ task, saving, onClose, onSave }) {
+function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
   const [photoBefore, setPhotoBefore] = useState(null);
   const [photoAfter, setPhotoAfter] = useState(null);
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
+    if (isSubstitute && !notes.trim()) {
+      setError("Informe o motivo de estar executando a tarefa no lugar do responsável.");
+      return;
+    }
     if (!photoBefore || !photoAfter) {
       setError("Tire as fotos de antes e depois para concluir.");
       return;
@@ -1056,7 +1069,7 @@ function TaskExecutionForm({ task, saving, onClose, onSave }) {
         <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={setPhotoBefore} />
         <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} />
       </div>
-      <div className="form-field"><label htmlFor="task-completion-notes">Observações</label><textarea id="task-completion-notes" maxLength={1000} rows={3} placeholder="Adicione uma observação (opcional)" value={notes} onChange={(event) => setNotes(event.target.value)} /></div>
+      <div className="form-field"><label htmlFor="task-completion-notes">{isSubstitute ? <>Motivo por executar no lugar de {task.assignee_name} <span className="required">*</span></> : "Observações (opcional)"}</label><textarea id="task-completion-notes" required={isSubstitute} maxLength={1000} rows={3} placeholder={isSubstitute ? "Explique por que está assumindo esta tarefa…" : "Adicione uma observação (opcional)"} value={notes} onChange={(event) => { setNotes(event.target.value); setError(""); }} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Concluir tarefa"}</button></footer>
     </form>
@@ -1320,10 +1333,10 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
 function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, sectors, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
   const [sector, setSector] = useState("");
   const responsibleOptions = [...new Set(allLocations
-    .filter((location) => !sector || location.responsible_sector === sector)
+    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
     .map((location) => location.responsible))]
     .sort((a, b) => a.localeCompare(b, "pt-BR"));
-  const sectorLocations = locations.filter((location) => !sector || location.responsible_sector === sector);
+  const sectorLocations = locations.filter((location) => !sector || sameSector(location.responsible_sector, sector));
   return (
     <>
       <PageHeading eyebrow="ORGANIZAÇÃO" title="Locais da empresa" description={isBoss ? "Gerencie os ambientes e acompanhe a rotina de cada um." : "Consulte os ambientes da empresa e registre as atividades sob seu usuário."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo local</button>} />
@@ -1362,19 +1375,24 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
   );
 }
 
-function HistoryPage({ entries, locations, loading, status, setStatus, onAdd, onView }) {
+function HistoryPage({ entries, locations, sectors, isBoss, loading, status, setStatus, onAdd, onView }) {
+  const [sector, setSector] = useState("");
+  const filteredEntries = entries.filter((entry) => !isBoss || !sector || sameSector(entry.responsible_sector, sector));
   return (
     <>
       <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." action={<button className="button-primary" onClick={onAdd} disabled={!locations.length}><Plus size={17} /> Registrar limpeza</button>} />
       <div className="toolbar panel">
-        <div className="toolbar-copy"><span className="result-count">{entries.length}</span><span>{entries.length === 1 ? "registro" : "registros"}</span></div>
-        <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos os status</option>{[...STATUSES, "Concluída"].map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+        <div className="toolbar-copy"><span className="result-count">{filteredEntries.length}</span><span>{filteredEntries.length === 1 ? "registro" : "registros"}</span></div>
+        <div className="toolbar-filters">
+          {isBoss && <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>}
+          <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos os status</option>{[...STATUSES, "Concluída"].map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+        </div>
       </div>
       <section className="panel history-panel">
-        {loading && !entries.length ? <LoadingState /> : entries.length ? (
+        {loading && !entries.length ? <LoadingState /> : filteredEntries.length ? (
           <div className="table-scroll"><table className="history-table">
             <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
-            <tbody>{entries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
+            <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
               <td><span className="history-parties"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span><small>Execução: {entry.executor_name || entry.created_by_name || "—"}</small></span></td>
               <td>{entry.record_type === "task" ? formatDate(entry.completed_at) : formatDate(entry.cleaning_date)}</td>
@@ -1529,7 +1547,7 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
 function RecordDialog({ item, onClose, onDelete }) {
   return <Modal title={item.record_type === "task" ? "Detalhes da tarefa" : "Detalhes do registro"} subtitle={item.record_type === "task" ? "HISTÓRICO DE TAREFAS" : "HISTÓRICO DE LIMPEZA"} onClose={onClose} wide>
     <div className="record-detail">
-      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>{item.record_type === "task" ? `Responsável: ${item.responsible || "—"} · Execução: ${item.executor_name || "—"} · setor ${item.responsible_sector || "—"}` : `Responsável: ${item.responsible || "—"} · Execução: ${item.executor_name || item.created_by_name || "—"}`}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
+      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"} · Execução: {item.executor_name || item.created_by_name || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
       <div className="record-date"><CalendarDays size={17} /><span>{item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDate(item.record_type === "task" ? item.completed_at : item.cleaning_date)}</strong></div>
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">

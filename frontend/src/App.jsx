@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -6,6 +6,7 @@ import {
   Bell,
   Building2,
   CalendarDays,
+  Camera,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -23,12 +24,17 @@ import {
   ListChecks,
   LogOut,
   Menu,
+  Monitor,
+  Moon,
   MoreHorizontal,
+  Palette,
   Pencil,
   Plus,
   ShieldCheck,
   Search,
+  Settings,
   Sparkles,
+  Sun,
   Trash2,
   Users,
   X,
@@ -113,6 +119,14 @@ function initials(name = "") {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "—";
 }
 
+function defaultAppearance() {
+  return { theme: "system", accent: "#557c68" };
+}
+
+function appearanceStorageKey(account) {
+  return `routiner-appearance:${account.login}`;
+}
+
 function App() {
   const [account, setAccount] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -172,6 +186,15 @@ function App() {
 function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [page, setPage] = useState("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [appearance, setAppearance] = useState(() => {
+    try {
+      return { ...defaultAppearance(), ...JSON.parse(localStorage.getItem(appearanceStorageKey(account)) || "{}") };
+    } catch {
+      return defaultAppearance();
+    }
+  });
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
   const [team, setTeam] = useState([]);
@@ -193,6 +216,17 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
   const isBoss = account.role === "company";
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = appearance.theme;
+    root.style.setProperty("--custom-accent", appearance.accent);
+    try {
+      localStorage.setItem(appearanceStorageKey(account), JSON.stringify(appearance));
+    } catch (error) {
+      setPageError(`Não foi possível salvar as configurações visuais neste dispositivo: ${error.message}`);
+    }
+  }, [account, appearance]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -346,17 +380,45 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }
 
-  async function completeTask(task) {
+  async function completeTask(task, completion) {
+    setSaving(true);
     try {
-      const result = await api(`/tasks/${task.id}/complete`, { method: "POST" });
+      const [beforeUpload, afterUpload] = await Promise.all([
+        uploadCapturedPhoto(completion.photo_before),
+        uploadCapturedPhoto(completion.photo_after),
+      ]);
+      const result = await api(`/tasks/${task.id}/complete`, {
+        method: "POST",
+        body: JSON.stringify({
+          photo_before: beforeUpload.url,
+          photo_after: afterUpload.url,
+          notes: completion.notes,
+        }),
+      });
       setTasks((current) => current.map((item) => item.id === task.id
-        ? { ...item, completed_at: result.completed_at }
+        ? {
+          ...item,
+          completed_at: result.completed_at,
+          photo_before: beforeUpload.url,
+          photo_after: afterUpload.url,
+          completion_notes: completion.notes,
+        }
         : item));
+      setModal(null);
       setToast("Tarefa concluída.");
       await refresh();
     } catch (error) {
       setToast(error.message);
+    } finally {
+      setSaving(false);
     }
+  }
+
+  async function uploadCapturedPhoto(file) {
+    if (!(file instanceof File)) throw new Error("Tire as duas fotos antes de concluir a tarefa.");
+    const formData = new FormData();
+    formData.append("file", file);
+    return api("/upload", { method: "POST", body: formData });
   }
 
   async function readNotification(notification) {
@@ -426,7 +488,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           <div className="profile">
             <div className="avatar">{initials(account.name)}</div>
             <div className="profile-copy"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
-            <button className="icon-button profile-more" aria-label="Sair da conta" title="Sair" onClick={onLogout}><LogOut size={17} /></button>
+            <button className="icon-button profile-more" aria-label="Abrir perfil" title="Configurações do perfil" onClick={() => setProfileMenuOpen((open) => !open)}><MoreHorizontal size={17} /></button>
           </div>
         </div>
       </aside>
@@ -489,7 +551,16 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               </div>
             )}
             {installPrompt && <button className="install-button" onClick={onInstall}><Download size={15} /><span>Instalar app</span></button>}
-            <div className="top-avatar" title={account.name}>{initials(account.name)}</div>
+            <div className="profile-menu-wrap">
+              <button className="top-avatar profile-trigger" title="Abrir perfil" aria-label="Abrir perfil" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)}>{initials(account.name)}</button>
+              {profileMenuOpen && (
+                <div className="profile-menu">
+                  <div className="profile-menu-heading"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
+                  <button onClick={() => { setProfileMenuOpen(false); setAppearanceOpen(true); }}><Settings size={16} /> Configurações</button>
+                  <button onClick={onLogout}><LogOut size={16} /> Sair</button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
 
@@ -543,7 +614,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               isBoss={isBoss}
               now={taskNow}
               onCreate={() => setModal({ type: "task" })}
-              onComplete={completeTask}
+              onComplete={(task) => setModal({ type: "task-execution", item: task })}
             />
           )}
           {page === "team" && isBoss && (
@@ -592,6 +663,21 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           saving={saving}
           onClose={() => setModal(null)}
           onSave={saveTask}
+        />
+      )}
+      {modal?.type === "task-execution" && (
+        <TaskExecutionForm
+          task={modal.item}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onSave={(completion) => completeTask(modal.item, completion)}
+        />
+      )}
+      {appearanceOpen && (
+        <AppearanceSettings
+          appearance={appearance}
+          onChange={setAppearance}
+          onClose={() => setAppearanceOpen(false)}
         />
       )}
       {modal?.type === "user" && (
@@ -776,7 +862,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
                   </div>
                   {!isBoss && task.acknowledged_at && (
                     <button className="button-primary task-complete" onClick={() => onComplete(task)}>
-                      <Check size={16} /> Concluir tarefa
+                      <Check size={16} /> Fazer tarefa
                     </button>
                   )}
                 </article>
@@ -815,7 +901,6 @@ function TaskForm({ team, saving, onClose, onSave }) {
     .slice(0, 16);
   const [values, setValues] = useState({ title: "", description: "", assigned_user_id: "", deadline: localDeadline });
   const [error, setError] = useState("");
-
   async function submit(event) {
     event.preventDefault();
     if (!team.length) {
@@ -840,6 +925,140 @@ function TaskForm({ team, saving, onClose, onSave }) {
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !team.length}>{saving && <LoaderCircle size={16} className="spin" />}Criar tarefa</button></footer>
     </form>
   </Modal>;
+}
+
+function AppearanceSettings({ appearance, onChange, onClose }) {
+  return <Modal title="Configurações de aparência" subtitle="PERSONALIZE SEU ESPAÇO" onClose={onClose}>
+    <div className="appearance-settings">
+      <p>Escolha como o Routiner deve aparecer neste dispositivo.</p>
+      <div className="appearance-options" role="radiogroup" aria-label="Tema">
+        {[
+          { value: "light", label: "Claro", icon: Sun },
+          { value: "dark", label: "Escuro", icon: Moon },
+          { value: "system", label: "Sistema", icon: Monitor },
+          { value: "custom", label: "Personalizado", icon: Palette },
+        ].map(({ value, label, icon: Icon }) => (
+          <button
+            type="button"
+            key={value}
+            role="radio"
+            aria-checked={appearance.theme === value}
+            className={`appearance-option ${appearance.theme === value ? "selected" : ""}`}
+            onClick={() => onChange((current) => ({ ...current, theme: value }))}
+          >
+            <Icon size={18} /><span>{label}</span>{appearance.theme === value && <CheckCircle2 size={15} />}
+          </button>
+        ))}
+      </div>
+      {appearance.theme === "custom" && (
+        <label className="accent-picker">
+          <span>Cor de destaque</span>
+          <input type="color" value={appearance.accent} onChange={(event) => onChange((current) => ({ ...current, accent: event.target.value }))} />
+        </label>
+      )}
+      <footer className="modal-footer"><span className="footer-spacer" /><button className="button-primary" onClick={onClose}>Concluir</button></footer>
+    </div>
+  </Modal>;
+}
+
+function TaskExecutionForm({ task, saving, onClose, onSave }) {
+  const [photoBefore, setPhotoBefore] = useState(null);
+  const [photoAfter, setPhotoAfter] = useState(null);
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+  async function submit(event) {
+    event.preventDefault();
+    if (!photoBefore || !photoAfter) {
+      setError("Tire as fotos de antes e depois para concluir.");
+      return;
+    }
+    setError("");
+    await onSave({ photo_before: photoBefore, photo_after: photoAfter, notes });
+  }
+  return <Modal title="Fazer tarefa" subtitle="EXECUÇÃO DA TAREFA" onClose={onClose} wide>
+    <form className="modal-form task-execution-form" onSubmit={submit}>
+      <div className="task-execution-summary"><strong>{task.title}</strong><span>{task.description || "Registre a execução da tarefa atribuída."}</span><small>Prazo: {formatDeadline(task.deadline)}</small></div>
+      <div className="task-photo-grid">
+        <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={setPhotoBefore} />
+        <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} />
+      </div>
+      <div className="form-field"><label htmlFor="task-completion-notes">Observações</label><textarea id="task-completion-notes" maxLength={1000} rows={3} placeholder="Adicione uma observação (opcional)" value={notes} onChange={(event) => setNotes(event.target.value)} /></div>
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Concluir tarefa"}</button></footer>
+    </form>
+  </Modal>;
+}
+
+function CameraPhotoField({ label, photo, onChange }) {
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [error, setError] = useState("");
+  const preview = useMemo(() => photo ? URL.createObjectURL(photo) : "", [photo]);
+  useEffect(() => () => {
+    if (preview) URL.revokeObjectURL(preview);
+  }, [preview]);
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+
+  function stopCamera() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }
+  async function openCamera() {
+    setError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError("A câmera não está disponível neste dispositivo.");
+      return;
+    }
+    try {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      setCameraOpen(true);
+    } catch (cameraError) {
+      setError(`Não foi possível acessar a câmera: ${cameraError.message}`);
+    }
+  }
+  useEffect(() => {
+    if (cameraOpen && videoRef.current && streamRef.current) videoRef.current.srcObject = streamRef.current;
+  }, [cameraOpen]);
+  function capture() {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) {
+      setError("A câmera ainda está carregando. Tente novamente em instantes.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setError("Não foi possível preparar a captura da foto.");
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setError("Não foi possível capturar a foto. Tente novamente.");
+        return;
+      }
+      onChange(new File([blob], `${label.toLowerCase().replaceAll(" ", "-")}.jpg`, { type: "image/jpeg" }));
+      setCameraOpen(false);
+      stopCamera();
+    }, "image/jpeg", 0.9);
+  }
+  return <div className="camera-photo-field">
+    <div className="camera-photo-label">{label}<span className="required">*</span></div>
+    {cameraOpen
+      ? <div className="camera-preview"><video ref={videoRef} autoPlay playsInline muted /><button type="button" className="button-primary" onClick={capture}><Camera size={16} /> Capturar</button><button type="button" className="button-secondary" onClick={() => { setCameraOpen(false); stopCamera(); }}>Cancelar câmera</button></div>
+      : photo
+        ? <div className="captured-photo"><img src={preview} alt={`${label} capturada`} /><div><span>Foto capturada</span><button type="button" className="button-secondary" onClick={() => onChange(null)}>Excluir foto</button><button type="button" className="button-secondary" onClick={openCamera}>Tirar novamente</button></div></div>
+        : <button type="button" className="camera-open" onClick={openCamera}><Camera size={21} /><strong>Abrir câmera</strong><small>Use a câmera para capturar a foto</small></button>}
+    {error && <span className="field-error">{error}</span>}
+  </div>;
 }
 
 function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
@@ -1013,7 +1232,7 @@ function HistoryPage({ entries, locations, loading, status, setStatus, onAdd, on
       <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." action={<button className="button-primary" onClick={onAdd} disabled={!locations.length}><Plus size={17} /> Registrar limpeza</button>} />
       <div className="toolbar panel">
         <div className="toolbar-copy"><span className="result-count">{entries.length}</span><span>{entries.length === 1 ? "registro" : "registros"}</span></div>
-        <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos os status</option>{STATUSES.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+        <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos os status</option>{[...STATUSES, "Concluída"].map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
       </div>
       <section className="panel history-panel">
         {loading && !entries.length ? <LoadingState /> : entries.length ? (
@@ -1022,8 +1241,8 @@ function HistoryPage({ entries, locations, loading, status, setStatus, onAdd, on
             <tbody>{entries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
               <td><span className="table-person"><span className="person-initial">{initials(entry.created_by_name || entry.responsible)}</span>{entry.created_by_name || entry.responsible}</span></td>
-              <td>{formatDate(entry.cleaning_date)}</td>
-              <td><span className={`status-pill ${entry.status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
+              <td>{entry.record_type === "task" ? formatDate(entry.completed_at) : formatDate(entry.cleaning_date)}</td>
+              <td><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
               <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
               <td><button className="icon-button table-open" onClick={(event) => { event.stopPropagation(); onView(entry); }} aria-label={`Abrir registro de ${entry.location_name}`}><ChevronRight size={17} /></button></td>
             </tr>)}</tbody>
@@ -1165,16 +1384,16 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
 }
 
 function RecordDialog({ item, onClose, onDelete }) {
-  return <Modal title="Detalhes do registro" subtitle="HISTÓRICO DE LIMPEZA" onClose={onClose} wide>
+  return <Modal title={item.record_type === "task" ? "Detalhes da tarefa" : "Detalhes do registro"} subtitle={item.record_type === "task" ? "HISTÓRICO DE TAREFAS" : "HISTÓRICO DE LIMPEZA"} onClose={onClose} wide>
     <div className="record-detail">
-      <div className="record-summary"><span className="table-location-icon"><Leaf size={17} /></span><div><strong>{item.location_name}</strong><small>Registrado por: {item.created_by_name || item.responsible || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
-      <div className="record-date"><CalendarDays size={17} /><span>Data da atividade</span><strong>{formatDate(item.cleaning_date)}</strong></div>
+      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>{item.record_type === "task" ? `Concluída por: ${item.created_by_name || "—"} · setor ${item.responsible || "—"}` : `Registrado por: ${item.created_by_name || item.responsible || "—"}`}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
+      <div className="record-date"><CalendarDays size={17} /><span>{item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDate(item.record_type === "task" ? item.completed_at : item.cleaning_date)}</strong></div>
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">
         <PhotoView label="Foto antes" photo={item.photo_before} />
         <PhotoView label="Foto depois" photo={item.photo_after} />
       </div>
-      <footer className="modal-footer"><button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button><span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
+      <footer className="modal-footer">{item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
 }

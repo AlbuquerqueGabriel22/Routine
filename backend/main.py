@@ -147,7 +147,10 @@ def initialize_database():
                 deadline TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 acknowledged_at TEXT,
-                completed_at TEXT
+                completed_at TEXT,
+                completion_notes TEXT NOT NULL DEFAULT '',
+                photo_before TEXT,
+                photo_after TEXT
             );
             CREATE TABLE IF NOT EXISTS company_notifications (
                 id TEXT PRIMARY KEY,
@@ -167,6 +170,9 @@ def initialize_database():
         add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
+        add_column_if_missing(conn, "tasks", "completion_notes TEXT NOT NULL DEFAULT ''")
+        add_column_if_missing(conn, "tasks", "photo_before TEXT")
+        add_column_if_missing(conn, "tasks", "photo_after TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_locations_company ON locations(company_id, name)"
         )
@@ -298,6 +304,17 @@ class TaskInput(BaseModel):
         if value <= datetime.now(timezone.utc):
             raise ValueError("O prazo deve ser uma data e hora futuras.")
         return value.astimezone(timezone.utc)
+
+
+class TaskCompletionInput(BaseModel):
+    photo_before: Annotated[str, Field(min_length=1, max_length=100)]
+    photo_after: Annotated[str, Field(min_length=1, max_length=100)]
+    notes: Annotated[str, Field(max_length=1000)] = ""
+
+    @field_validator("notes")
+    @classmethod
+    def clean_completion_notes(cls, value: str) -> str:
+        return value.strip()
 
 
 def hash_password(password: str) -> str:
@@ -698,16 +715,43 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
 
 
 @app.post("/api/tasks/{task_id}/complete")
-def complete_task(task_id: str, session: dict = Depends(current_session)):
+def complete_task(
+    task_id: str,
+    payload: TaskCompletionInput,
+    session: dict = Depends(current_session),
+):
     if session["role"] != "user":
         raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode concluir a tarefa.")
+    photo_filenames = []
+    for photo in (payload.photo_before, payload.photo_after):
+        match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:jpg|png|webp))", photo)
+        if match is None:
+            raise HTTPException(status_code=422, detail="As duas fotos devem ser capturadas e enviadas pelo aplicativo.")
+        photo_filenames.append(match.group(1))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
+        for filename in photo_filenames:
+            upload = conn.execute(
+                """SELECT 1 FROM uploads
+                    WHERE filename = ? AND company_id = ? AND owner_user_id = ?""",
+                (filename, session["company_id"], session["account_id"]),
+            ).fetchone()
+            if upload is None:
+                raise HTTPException(status_code=403, detail="Uma das fotos não pertence a esta conta.")
         cursor = conn.execute(
-            """UPDATE tasks SET completed_at = ?
+            """UPDATE tasks SET completed_at = ?, completion_notes = ?,
+                    photo_before = ?, photo_after = ?
                 WHERE id = ? AND company_id = ? AND assigned_user_id = ?
                     AND acknowledged_at IS NOT NULL AND completed_at IS NULL""",
-            (now, task_id, session["company_id"], session["account_id"]),
+            (
+                now,
+                payload.notes,
+                payload.photo_before,
+                payload.photo_after,
+                task_id,
+                session["company_id"],
+                session["account_id"],
+            ),
         )
         if cursor.rowcount == 0:
             existing = conn.execute(
@@ -943,10 +987,11 @@ def list_history(
         clauses.append("c.location_id = ?")
         params.append(location_id)
     if status:
-        if status not in STATUSES:
+        if status not in STATUSES | {"Concluída"}:
             raise HTTPException(status_code=422, detail="Filtro de status inválido.")
-        clauses.append("c.status = ?")
-        params.append(status)
+        if status != "Concluída":
+            clauses.append("c.status = ?")
+            params.append(status)
     if search.strip():
         clauses.append("(l.name LIKE ? OR l.responsible LIKE ? OR c.notes LIKE ? OR u.name LIKE ?)")
         params.extend([f"%{search.strip()}%"] * 4)
@@ -966,11 +1011,46 @@ def list_history(
             JOIN companies co ON co.id = l.company_id
             LEFT JOIN users u ON u.id = c.created_by_user_id
             WHERE {' AND '.join(clauses)}
+                AND (? != 'Concluída')
             ORDER BY c.cleaning_date DESC, c.created_at DESC
             """,
-            params,
+            [*params, status],
         ).fetchall()
-    return [dict(row) for row in rows]
+        task_clauses = ["t.company_id = ?", "t.completed_at IS NOT NULL"]
+        task_params: list[str] = [session["company_id"]]
+        if session["role"] == "user":
+            task_clauses.append("t.assigned_user_id = ?")
+            task_params.append(session["account_id"])
+        if status and status != "Concluída":
+            task_clauses.append("0 = 1")
+        if search.strip():
+            task_clauses.append("(t.title LIKE ? OR t.description LIKE ? OR u.name LIKE ? OR u.sector LIKE ?)")
+            task_params.extend([f"%{search.strip()}%"] * 4)
+        if date_from:
+            task_clauses.append("substr(t.completed_at, 1, 10) >= ?")
+            task_params.append(date_from)
+        if date_to:
+            task_clauses.append("substr(t.completed_at, 1, 10) <= ?")
+            task_params.append(date_to)
+        task_rows = conn.execute(
+            f"""SELECT             'task-' || t.id AS id, t.id AS task_id, 'task' AS record_type,
+                    substr(t.completed_at, 1, 10) AS cleaning_date,
+                    t.completed_at AS completed_at,
+                    'Concluída' AS status, t.photo_before, t.photo_after,
+                    t.completion_notes AS notes, t.completed_at AS created_at,
+                    t.title AS location_name, u.sector AS responsible,
+                    u.name AS created_by_name
+                FROM tasks t
+                JOIN users u ON u.id = t.assigned_user_id
+                WHERE {' AND '.join(task_clauses)}
+                ORDER BY t.completed_at DESC""",
+            task_params,
+        ).fetchall()
+    return sorted(
+        [dict(row) for row in (*rows, *task_rows)],
+        key=lambda row: (row["cleaning_date"] or "", row["created_at"] or ""),
+        reverse=True,
+    )
 
 
 @app.post("/api/history", status_code=201)

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, session } = require("electron");
 const { spawn } = require("node:child_process");
 const net = require("node:net");
 const path = require("node:path");
@@ -143,6 +143,13 @@ if (!gotLock) {
       serverPort = await findAvailablePort();
       startApi(serverPort);
       await waitForApi(serverPort);
+      session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+        const localOrigin = `http://127.0.0.1:${serverPort}`;
+        const allowed = permission === "media"
+          && details.mediaTypes?.includes("video")
+          && details.requestingUrl?.startsWith(`${localOrigin}/`);
+        callback(Boolean(allowed));
+      });
       await createMainWindow();
     } catch (error) {
       showStartupError(error.message);

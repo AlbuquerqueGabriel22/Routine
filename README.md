@@ -11,6 +11,8 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Cadastro e manutenção de locais pela empresa; funcionários podem consultá-los e registrar atividades.
 - Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
 - Alertas visuais de prazo ficam mais urgentes conforme a data se aproxima. A empresa recebe no sino os registros de ciência e conclusão, com funcionário, setor, tarefa e prazo.
+- O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. As conclusões aparecem no histórico.
+- Cada conta pode escolher tema claro, escuro, seguir o sistema ou personalizar a cor de destaque nas configurações do perfil.
 - Histórico de atividades com data, status, observações e fotos antes/depois. Os registros não possuem operação de edição.
 - Fotos protegidas por sessão e escopo da empresa/conta.
 - Layout responsivo e instalação como aplicativo pelo navegador compatível.

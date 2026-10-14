@@ -47,7 +47,7 @@ const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase(
 const navItems = [
   { id: "dashboard", label: "Visão geral", icon: LayoutDashboard },
   { id: "tasks", label: "Tarefas", icon: ListChecks },
-  { id: "locations", label: "Locais", icon: Leaf },
+  { id: "locations", label: "Locais", icon: Leaf, companyOnly: true },
   { id: "history", label: "Histórico", icon: ClipboardCheck },
   { id: "team", label: "Equipe", icon: Users, companyOnly: true },
 ];
@@ -583,6 +583,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               locations={locations}
               history={history}
               account={account}
+              isBoss={isBoss}
               onNavigate={navigate}
               onAddCleaning={(location) => setModal({ type: "cleaning", initial: location ? { location_id: location.id } : null })}
               onOpenRecord={(record) => setModal({ type: "record", item: record })}
@@ -1264,7 +1265,7 @@ function PageHeading({ eyebrow, title, description, action }) {
   );
 }
 
-function DashboardPage({ data, loading, locations, history, account, onNavigate, onAddCleaning, onOpenRecord }) {
+function DashboardPage({ data, loading, locations, history, account, isBoss, onNavigate, onAddCleaning, onOpenRecord }) {
   const weekday = new Intl.DateTimeFormat("pt-BR", { weekday: "long" }).format(new Date());
   const dateLabel = new Intl.DateTimeFormat("pt-BR", { day: "numeric", month: "long", year: "numeric" }).format(new Date());
   const completion = data?.locations ? Math.round((data.completed_today / data.locations) * 100) : 0;
@@ -1278,7 +1279,7 @@ function DashboardPage({ data, loading, locations, history, account, onNavigate,
           <div className="welcome-kicker"><span className="live-dot" /> SEU RESUMO DE HOJE</div>
           <h2>Um ambiente cuidado<br />começa por aqui.</h2>
           <p>Acompanhe os locais, organize as frequências<br className="desktop-only" /> e mantenha tudo em dia.</p>
-          <button className="welcome-link" onClick={() => onNavigate("locations")}>Ver meus locais <ArrowRight size={16} /></button>
+          {isBoss && <button className="welcome-link" onClick={() => onNavigate("locations")}>Ver meus locais <ArrowRight size={16} /></button>}
         </div>
         <div className="welcome-art" aria-hidden="true">
           <div className="art-orbit orbit-one" /><div className="art-orbit orbit-two" />
@@ -1317,7 +1318,7 @@ function DashboardPage({ data, loading, locations, history, account, onNavigate,
         </section>
         <section className="panel quick-panel">
           <div className="section-head"><div><h2>Acesso rápido</h2><p>O que você precisa fazer?</p></div></div>
-          <button className="quick-action" onClick={() => onNavigate("locations")}><span className="quick-icon sage"><Leaf size={18} /></span><span><strong>Explorar locais</strong><small>{locations.length} {locations.length === 1 ? "local cadastrado" : "locais cadastrados"}</small></span><ArrowRight size={16} /></button>
+          {isBoss && <button className="quick-action" onClick={() => onNavigate("locations")}><span className="quick-icon sage"><Leaf size={18} /></span><span><strong>Explorar locais</strong><small>{locations.length} {locations.length === 1 ? "local cadastrado" : "locais cadastrados"}</small></span><ArrowRight size={16} /></button>}
           <button className="quick-action" onClick={() => onAddCleaning()}><span className="quick-icon blue"><ClipboardCheck size={18} /></span><span><strong>Registrar limpeza</strong><small>Adicionar ao histórico</small></span><ArrowRight size={16} /></button>
           <div className="quick-tip"><Sparkles size={16} /><span>Registros consistentes ajudam sua equipe a manter uma rotina organizada.</span></div>
         </section>

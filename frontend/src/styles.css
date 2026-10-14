@@ -445,8 +445,6 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .task-meta { display: flex; flex-wrap: wrap; gap: 6px 15px; margin-top: 9px; color: #89968e; font-size: 9px; }
 .task-meta span { display: inline-flex; align-items: center; gap: 5px; }.task-meta svg { color: #90a096; }
 .task-complete { min-height: 35px; padding: 0 10px; font-size: 9px; }
-.history-parties { display: grid; gap: 4px; }
-.history-parties > small { padding-left: 27px; color: #929d96; font-size: 9px; white-space: nowrap; }
 .task-card-complete { opacity: .8; }
 .task-empty { min-height: 210px; }
 .completed-tasks { margin-top: 28px; }

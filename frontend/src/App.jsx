@@ -1069,7 +1069,7 @@ function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
         <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={setPhotoBefore} />
         <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} />
       </div>
-      <div className="form-field"><label htmlFor="task-completion-notes">{isSubstitute ? <>Motivo por executar no lugar de {task.assignee_name} <span className="required">*</span></> : "Observações (opcional)"}</label><textarea id="task-completion-notes" required={isSubstitute} maxLength={1000} rows={3} placeholder={isSubstitute ? "Explique por que está assumindo esta tarefa…" : "Adicione uma observação (opcional)"} value={notes} onChange={(event) => { setNotes(event.target.value); setError(""); }} /></div>
+      <div className="form-field"><label htmlFor="task-completion-notes">{isSubstitute ? <>Por que você está executando a tarefa de {task.assignee_name}? <span className="required">*</span></> : "Observações (opcional)"}</label><textarea id="task-completion-notes" required={isSubstitute} maxLength={1000} rows={3} placeholder={isSubstitute ? "Descreva o motivo da execução por outra pessoa…" : "Adicione uma observação (opcional)"} value={notes} onChange={(event) => { setNotes(event.target.value); setError(""); }} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Concluir tarefa"}</button></footer>
     </form>
@@ -1391,10 +1391,11 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
       <section className="panel history-panel">
         {loading && !entries.length ? <LoadingState /> : filteredEntries.length ? (
           <div className="table-scroll"><table className="history-table">
-            <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
+            <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
-              <td><span className="history-parties"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span><small>Execução: {entry.executor_name || entry.created_by_name || "—"}</small></span></td>
+              <td><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
+              <td>{entry.executor_name || entry.created_by_name || "—"}</td>
               <td>{entry.record_type === "task" ? formatDate(entry.completed_at) : formatDate(entry.cleaning_date)}</td>
               <td><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
               <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>

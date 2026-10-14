@@ -1,6 +1,6 @@
 {
   "name": "routiner-desktop",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "description": "Aplicativo desktop Routiner para Windows",
   "main": "desktop/main.cjs",

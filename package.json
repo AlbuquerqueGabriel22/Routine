@@ -1,6 +1,6 @@
 {
   "name": "routiner-desktop",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "private": true,
   "description": "Aplicativo desktop Routiner para Windows",
   "main": "desktop/main.cjs",
@@ -51,6 +51,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Routiner"

@@ -114,6 +114,13 @@ def initialize_database():
                 created_at TEXT NOT NULL,
                 UNIQUE(company_id, username)
             );
+            CREATE TABLE IF NOT EXISTS sectors (
+                id TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                name TEXT NOT NULL COLLATE NOCASE,
+                created_at TEXT NOT NULL,
+                UNIQUE(company_id, name)
+            );
             CREATE TABLE IF NOT EXISTS locations (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -181,6 +188,13 @@ def initialize_database():
                     HAVING COUNT(*) = 1
                 )
                 WHERE responsible_user_id IS NULL"""
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO sectors (id, company_id, name, created_at)
+                SELECT lower(hex(randomblob(16))), company_id, trim(sector), ?
+                FROM users WHERE trim(sector) != ''
+                GROUP BY company_id, lower(trim(sector))""",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
         )
         add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
@@ -269,6 +283,28 @@ class UserInput(BaseModel):
         return username
 
 
+class UserUpdateInput(BaseModel):
+    name: Annotated[str, Field(min_length=2, max_length=120)]
+    sector: Annotated[str, Field(min_length=2, max_length=80)]
+
+    @field_validator("name", "sector")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        return value.strip()
+
+
+class SectorInput(BaseModel):
+    name: Annotated[str, Field(min_length=2, max_length=80)]
+
+    @field_validator("name")
+    @classmethod
+    def clean_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("Informe um nome de setor com pelo menos 2 caracteres.")
+        return cleaned
+
+
 class LocationInput(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     photo: str | None = None
@@ -322,6 +358,33 @@ class TaskInput(BaseModel):
             raise ValueError("O prazo precisa incluir o fuso horário.")
         if value <= datetime.now(timezone.utc):
             raise ValueError("O prazo deve ser uma data e hora futuras.")
+        return value.astimezone(timezone.utc)
+
+
+class TaskUpdateInput(BaseModel):
+    assigned_user_id: str
+    title: Annotated[str, Field(min_length=2, max_length=120)]
+    description: Annotated[str, Field(max_length=1000)] = ""
+    deadline: datetime
+
+    @field_validator("title")
+    @classmethod
+    def clean_task_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("O título da tarefa não pode ficar vazio.")
+        return cleaned
+
+    @field_validator("description")
+    @classmethod
+    def clean_task_description(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("deadline")
+    @classmethod
+    def validate_deadline(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("O prazo precisa incluir o fuso horário.")
         return value.astimezone(timezone.utc)
 
 
@@ -688,11 +751,89 @@ def list_users(session: dict = Depends(company_only)):
     ]
 
 
+@app.get("/api/sectors")
+def list_sectors(session: dict = Depends(company_only)):
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT s.id, s.name, COUNT(DISTINCT u.id) AS employee_count,
+                    COUNT(DISTINCT l.id) AS location_count
+                FROM sectors s
+                LEFT JOIN users u ON u.company_id = s.company_id
+                    AND lower(trim(u.sector)) = lower(trim(s.name))
+                LEFT JOIN locations l ON l.company_id = s.company_id
+                    AND l.responsible_user_id = u.id
+                WHERE s.company_id = ?
+                GROUP BY s.id
+                ORDER BY s.name COLLATE NOCASE""",
+            (session["company_id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/sectors", status_code=201)
+def create_sector(payload: SectorInput, session: dict = Depends(company_only)):
+    sector_id = str(uuid.uuid4())
+    try:
+        with connection() as conn:
+            conn.execute(
+                "INSERT INTO sectors (id, company_id, name, created_at) VALUES (?, ?, ?, ?)",
+                (
+                    sector_id,
+                    session["company_id"],
+                    payload.name,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+    except sqlite3.IntegrityError as error:
+        raise HTTPException(status_code=409, detail="Este setor já existe nesta empresa.") from error
+    return {"id": sector_id, "name": payload.name, "employee_count": 0, "location_count": 0}
+
+
+@app.delete("/api/sectors/{sector_id}", status_code=204)
+def delete_sector(sector_id: str, session: dict = Depends(company_only)):
+    with connection() as conn:
+        sector = conn.execute(
+            "SELECT name FROM sectors WHERE id = ? AND company_id = ?",
+            (sector_id, session["company_id"]),
+        ).fetchone()
+        if sector is None:
+            raise HTTPException(status_code=404, detail="Setor não encontrado.")
+        usage = conn.execute(
+            """SELECT
+                    EXISTS(SELECT 1 FROM users WHERE company_id = ?
+                        AND lower(trim(sector)) = lower(trim(?))) AS has_users,
+                    EXISTS(SELECT 1 FROM locations l JOIN users u ON u.id = l.responsible_user_id
+                        WHERE l.company_id = ? AND lower(trim(u.sector)) = lower(trim(?))) AS has_locations""",
+            (session["company_id"], sector["name"], session["company_id"], sector["name"]),
+        ).fetchone()
+        if usage["has_users"] or usage["has_locations"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Transfira ou remova os funcionários e locais deste setor antes de excluí-lo.",
+            )
+        conn.execute(
+            "DELETE FROM sectors WHERE id = ? AND company_id = ?",
+            (sector_id, session["company_id"]),
+        )
+
+
+def require_company_sector(conn: sqlite3.Connection, company_id: str, sector_name: str):
+    sector = conn.execute(
+        """SELECT name FROM sectors
+            WHERE company_id = ? AND lower(trim(name)) = lower(trim(?))""",
+        (company_id, sector_name),
+    ).fetchone()
+    if sector is None:
+        raise HTTPException(status_code=422, detail="Selecione um setor cadastrado para esta empresa.")
+    return sector["name"]
+
+
 @app.post("/api/users", status_code=201)
 def create_user(payload: UserInput, session: dict = Depends(company_only)):
     user_id = str(uuid.uuid4())
     with connection() as conn:
         company = company_row(conn, session["company_id"])
+        sector_name = require_company_sector(conn, session["company_id"], payload.sector)
         try:
             conn.execute(
                 """INSERT INTO users
@@ -702,7 +843,7 @@ def create_user(payload: UserInput, session: dict = Depends(company_only)):
                     user_id,
                     session["company_id"],
                     payload.name,
-                    payload.sector,
+                    sector_name,
                     payload.username,
                     hash_password(payload.password),
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -713,9 +854,36 @@ def create_user(payload: UserInput, session: dict = Depends(company_only)):
     return {
         "id": user_id,
         "name": payload.name,
-        "sector": payload.sector,
+        "sector": sector_name,
         "username": payload.username,
         "login": f'{payload.username}.{company["company_handle"]}.routine',
+    }
+
+
+@app.put("/api/users/{user_id}")
+def update_user(user_id: str, payload: UserUpdateInput, session: dict = Depends(company_only)):
+    with connection() as conn:
+        sector_name = require_company_sector(conn, session["company_id"], payload.sector)
+        cursor = conn.execute(
+            """UPDATE users SET name = ?, sector = ?
+                WHERE id = ? AND company_id = ?""",
+            (payload.name, sector_name, user_id, session["company_id"]),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Funcionário não encontrado.")
+        row = conn.execute(
+            """SELECT u.id, u.name, u.sector, u.username,
+                    c.company_handle
+                FROM users u JOIN companies c ON c.id = u.company_id
+                WHERE u.id = ? AND u.company_id = ?""",
+            (user_id, session["company_id"]),
+        ).fetchone()
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "sector": row["sector"],
+        "username": row["username"],
+        "login": f'{row["username"]}.{row["company_handle"]}.routine',
     }
 
 
@@ -776,6 +944,62 @@ def create_task(payload: TaskInput, session: dict = Depends(company_only)):
                 FROM tasks t JOIN users u ON u.id = t.assigned_user_id
                 WHERE t.id = ?""",
             (task_id,),
+        ).fetchone()
+    return dict(row)
+
+
+@app.put("/api/tasks/{task_id}")
+def update_task(
+    task_id: str,
+    payload: TaskUpdateInput,
+    session: dict = Depends(company_only),
+):
+    with connection() as conn:
+        assignee = conn.execute(
+            "SELECT id FROM users WHERE id = ? AND company_id = ?",
+            (payload.assigned_user_id, session["company_id"]),
+        ).fetchone()
+        if assignee is None:
+            raise HTTPException(status_code=404, detail="Funcionário não encontrado nesta empresa.")
+        existing = conn.execute(
+            """SELECT assigned_user_id, title, description, deadline, completed_at
+                FROM tasks WHERE id = ? AND company_id = ?""",
+            (task_id, session["company_id"]),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Demanda não encontrada.")
+        if existing["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Demandas concluídas não podem ser editadas.")
+        deadline = payload.deadline.isoformat(timespec="seconds")
+        changed = any(
+            (
+                existing["assigned_user_id"] != payload.assigned_user_id,
+                existing["title"] != payload.title,
+                existing["description"] != payload.description,
+                existing["deadline"] != deadline,
+            )
+        )
+        conn.execute(
+            """UPDATE tasks SET assigned_user_id = ?, title = ?, description = ?,
+                    deadline = ?, acknowledged_at = CASE WHEN ? THEN NULL ELSE acknowledged_at END
+                WHERE id = ? AND company_id = ?""",
+            (
+                payload.assigned_user_id,
+                payload.title,
+                payload.description,
+                deadline,
+                int(changed),
+                task_id,
+                session["company_id"],
+            ),
+        )
+        row = conn.execute(
+            """SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector,
+                    executor.name AS completed_by_name
+                FROM tasks t JOIN users u ON u.id = t.assigned_user_id
+                LEFT JOIN users executor ON executor.id = t.completed_by_user_id
+                WHERE t.id = ? AND t.company_id = ?""",
+            (task_id, session["company_id"]),
         ).fetchone()
     return dict(row)
 

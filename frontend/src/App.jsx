@@ -198,6 +198,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
   const [team, setTeam] = useState([]);
+  const [sectors, setSectors] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -232,18 +233,20 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     setLoading(true);
     setPageError("");
     try {
-      const [locationRows, historyRows, dashboardData, teamRows, taskRows, notificationRows] = await Promise.all([
+      const [locationRows, historyRows, dashboardData, teamRows, taskRows, notificationRows, sectorRows] = await Promise.all([
         api("/locations"),
         api("/history"),
         api("/dashboard"),
         isBoss ? api("/users") : Promise.resolve([]),
         api("/tasks"),
         isBoss ? api("/notifications") : Promise.resolve([]),
+        isBoss ? api("/sectors") : Promise.resolve([]),
       ]);
       setLocations(locationRows);
       setHistory(historyRows);
       setDashboard(dashboardData);
       setTeam(teamRows);
+      setSectors(sectorRows);
       setTasks(taskRows);
       setNotifications(notificationRows);
     } catch (error) {
@@ -352,12 +355,15 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }
 
-  async function saveTask(values) {
+  async function saveTask(values, id) {
     setSaving(true);
     try {
-      await api("/tasks", { method: "POST", body: JSON.stringify(values) });
+      await api(id ? `/tasks/${id}` : "/tasks", {
+        method: id ? "PUT" : "POST",
+        body: JSON.stringify(values),
+      });
       setModal(null);
-      setToast("Tarefa criada e atribuída.");
+      setToast(id ? "Demanda atualizada." : "Tarefa criada e atribuída.");
       await refresh();
     } catch (error) {
       throw error;
@@ -591,6 +597,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               setResponsible={setResponsibleFilter}
               photo={photoFilter}
               setPhoto={setPhotoFilter}
+              sectors={sectors}
               isBoss={isBoss}
               onAdd={() => setModal({ type: "location" })}
               onEdit={(item) => setModal({ type: "location", item })}
@@ -616,6 +623,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               isBoss={isBoss}
               now={taskNow}
               onCreate={() => setModal({ type: "task" })}
+              onEdit={(task) => setModal({ type: "task", item: task })}
               onComplete={(task) => setModal({ type: "task-execution", item: task })}
             />
           )}
@@ -624,7 +632,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               team={team}
               loading={loading}
               company={account.company}
+              tasks={tasks}
+              onManageSectors={() => setModal({ type: "sectors" })}
               onAdd={() => setModal({ type: "user" })}
+              onEdit={(member) => setModal({ type: "user-edit", item: member })}
             />
           )}
           {page === "about" && <AboutPage />}
@@ -644,6 +655,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
         <LocationForm
           item={modal.item}
           team={team}
+          sectors={sectors}
           saving={saving}
           onClose={() => setModal(null)}
           onSave={saveLocation}
@@ -662,6 +674,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       )}
       {modal?.type === "task" && (
         <TaskForm
+          item={modal.item}
           team={team}
           saving={saving}
           onClose={() => setModal(null)}
@@ -686,6 +699,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "user" && (
         <UserForm
           company={account.company}
+          sectors={sectors}
           saving={saving}
           onClose={() => setModal(null)}
           onSave={async (values) => {
@@ -697,6 +711,54 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               await refresh();
             } catch (error) {
               throw error;
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+      )}
+      {modal?.type === "user-edit" && (
+        <UserEditForm
+          member={modal.item}
+          sectors={sectors}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onSave={async (values) => {
+            setSaving(true);
+            try {
+              await api(`/users/${modal.item.id}`, { method: "PUT", body: JSON.stringify(values) });
+              setModal(null);
+              setToast("Funcionário atualizado.");
+              await refresh();
+            } catch (error) {
+              throw error;
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+      )}
+      {modal?.type === "sectors" && (
+        <SectorManagement
+          sectors={sectors}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onAdd={async (name) => {
+            setSaving(true);
+            try {
+              await api("/sectors", { method: "POST", body: JSON.stringify({ name }) });
+              setToast("Setor cadastrado.");
+              await refresh();
+            } finally {
+              setSaving(false);
+            }
+          }}
+          onDelete={async (sector) => {
+            setSaving(true);
+            try {
+              await api(`/sectors/${sector.id}`, { method: "DELETE" });
+              setToast("Setor excluído.");
+              await refresh();
             } finally {
               setSaving(false);
             }
@@ -811,16 +873,16 @@ function AuthPage({ initialError, onAuthenticated }) {
   );
 }
 
-function TeamPage({ team, loading, company, onAdd }) {
+function TeamPage({ team, loading, company, tasks, onManageSectors, onAdd, onEdit }) {
   return (
     <>
-      <PageHeading eyebrow="ADMINISTRAÇÃO DA EMPRESA" title="Sua equipe" description="Gerencie as contas e acompanhe quem registrou cada atividade." action={<button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar funcionário</button>} />
+      <PageHeading eyebrow="ADMINISTRAÇÃO DA EMPRESA" title="Sua equipe" description="Gerencie setores, funcionários e demandas atribuídas." action={<div className="heading-actions"><button className="button-secondary" onClick={onManageSectors}><Settings size={16} /> Setores</button><button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar funcionário</button></div>} />
       <section className="company-summary panel"><div className="company-symbol"><Building2 size={20} /></div><div><span>EMPRESA</span><strong>{company.fantasy_name}</strong><small>Login: {company.company_handle}.routine · {company.email}</small></div><span className="admin-badge"><BadgeCheck size={14} /> Administrador</span></section>
       <section className="panel team-panel">
         <div className="section-head"><div><h2>Contas de funcionários</h2><p>Funcionários veem apenas os registros criados pela própria conta.</p></div><span className="result-count">{team.length}</span></div>
         {loading && !team.length ? <LoadingState /> : team.length ? (
-          <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>CONTA</th></tr></thead><tbody>
-            {team.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td><span className="team-status"><span className="status-dot" /> Ativa</span></td></tr>)}
+          <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
+            {team.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td>{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at).length} pendentes</td><td><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
           </tbody></table></div>
         ) : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e registrar as próprias atividades." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
       </section>
@@ -828,7 +890,7 @@ function TeamPage({ team, loading, company, onAdd }) {
   );
 }
 
-function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
+function TasksPage({ tasks, loading, isBoss, now, onCreate, onEdit, onComplete }) {
   const pending = tasks.filter((task) => !task.completed_at);
   const completed = tasks.filter((task) => task.completed_at);
   return (
@@ -868,6 +930,7 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
                       <Check size={16} /> Fazer tarefa
                     </button>
                   )}
+                  {isBoss && <button className="button-secondary task-complete" onClick={() => onEdit(task)}><Pencil size={15} /> Editar demanda</button>}
                 </article>
               );
             })}
@@ -897,12 +960,17 @@ function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
   );
 }
 
-function TaskForm({ team, saving, onClose, onSave }) {
-  const defaultDeadline = new Date(Date.now() + 60 * 60 * 1000);
+function TaskForm({ item, team, saving, onClose, onSave }) {
+  const defaultDeadline = item ? new Date(item.deadline) : new Date(Date.now() + 60 * 60 * 1000);
   const localDeadline = new Date(defaultDeadline.getTime() - defaultDeadline.getTimezoneOffset() * 60_000)
     .toISOString()
     .slice(0, 16);
-  const [values, setValues] = useState({ title: "", description: "", assigned_user_id: "", deadline: localDeadline });
+  const [values, setValues] = useState({
+    title: item?.title || "",
+    description: item?.description || "",
+    assigned_user_id: item?.assigned_user_id || "",
+    deadline: localDeadline,
+  });
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
@@ -912,20 +980,23 @@ function TaskForm({ team, saving, onClose, onSave }) {
     }
     setError("");
     try {
-      await onSave({ ...values, title: values.title.trim(), deadline: new Date(values.deadline).toISOString() });
+      await onSave(
+        { ...values, title: values.title.trim(), deadline: new Date(values.deadline).toISOString() },
+        item?.id,
+      );
     } catch (saveError) {
       setError(saveError.message);
     }
   }
 
-  return <Modal title="Nova tarefa" subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
+  return <Modal title={item ? "Editar demanda" : "Nova tarefa"} subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>
       <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required value={values.assigned_user_id} onChange={(event) => setValues({ ...values, assigned_user_id: event.target.value })}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
       <div className="form-field"><label htmlFor="task-deadline">Prazo final — data e hora <span className="required">*</span></label><input id="task-deadline" type="datetime-local" required value={values.deadline} onChange={(event) => setValues({ ...values, deadline: event.target.value })} /><small className="field-hint">O horário será salvo com o fuso local e exibido para a equipe.</small></div>
       <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !team.length}>{saving && <LoaderCircle size={16} className="spin" />}Criar tarefa</button></footer>
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !team.length}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Criar tarefa"}</button></footer>
     </form>
   </Modal>;
 }
@@ -1085,7 +1156,7 @@ function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
   );
 }
 
-function UserForm({ company, saving, onClose, onSave }) {
+function UserForm({ company, sectors, saving, onClose, onSave }) {
   const [values, setValues] = useState({ name: "", sector: "", username: "", password: "" });
   const [error, setError] = useState("");
   const login = values.username ? `${values.username.toLowerCase()}.${company.company_handle}.routine` : `usuario.${company.company_handle}.routine`;
@@ -1101,13 +1172,69 @@ function UserForm({ company, saving, onClose, onSave }) {
   return <Modal title="Cadastrar funcionário" subtitle="NOVA CONTA DA EQUIPE" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="employee-name">Nome completo <span className="required">*</span></label><input id="employee-name" autoFocus required minLength={2} maxLength={120} autoComplete="name" placeholder="Nome do funcionário" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
-      <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><input id="employee-sector" required minLength={2} maxLength={80} placeholder="Ex.: Cozinha, salão, estoque" value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><select id="employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}><option value="">Selecione um setor</option>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select>{!sectors.length && <small className="field-hint">Cadastre um setor no menu Equipe → Setores antes de incluir funcionários.</small>}</div>
       <div className="form-field"><label htmlFor="employee-username">Identificador de usuário <span className="required">*</span></label><div className="handle-input"><input id="employee-username" required minLength={2} maxLength={30} pattern="[A-Za-z0-9][A-Za-z0-9\-]{1,29}" placeholder="maria" value={values.username} onChange={(event) => setValues({ ...values, username: event.target.value.toLowerCase() })} /><span>.{company.company_handle}.routine</span></div><small className="field-hint">Login completo: <code>{login}</code></small></div>
       <div className="form-field"><label htmlFor="employee-password">Senha inicial <span className="required">*</span></label><input id="employee-password" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Mínimo de 8 caracteres" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} /><small className="field-hint">Compartilhe o login e a senha inicial com o funcionário.</small></div>
       <div className="auth-note"><ShieldCheck size={16} /><span>O funcionário só poderá consultar os registros enviados pelo próprio login. A empresa poderá consultar todos.</span></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Criar conta</button></footer>
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !sectors.length}>{saving && <LoaderCircle size={16} className="spin" />}Criar conta</button></footer>
     </form>
+  </Modal>;
+}
+
+function UserEditForm({ member, sectors, saving, onClose, onSave }) {
+  const [values, setValues] = useState({ name: member.name, sector: member.sector });
+  const [error, setError] = useState("");
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      await onSave(values);
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+  return <Modal title="Editar funcionário" subtitle="EQUIPE E SETOR" onClose={onClose}>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-field"><label htmlFor="edit-employee-name">Nome completo</label><input id="edit-employee-name" required minLength={2} maxLength={120} value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="edit-employee-sector">Setor</label><select id="edit-employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select></div>
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Salvar alterações</button></footer>
+    </form>
+  </Modal>;
+}
+
+function SectorManagement({ sectors, saving, onClose, onAdd, onDelete }) {
+  const [name, setName] = useState("");
+  const [error, setError] = useState("");
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    try {
+      await onAdd(name.trim());
+      setName("");
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+  async function remove(sector) {
+    setError("");
+    try {
+      await onDelete(sector);
+    } catch (deleteError) {
+      setError(deleteError.message);
+    }
+  }
+  return <Modal title="Gerenciar setores" subtitle="ORGANIZAÇÃO DA EQUIPE" onClose={onClose}>
+    <div className="modal-form">
+      <form className="form-row" onSubmit={submit}>
+        <div className="form-field"><label htmlFor="new-sector">Novo setor</label><input id="new-sector" required minLength={2} maxLength={80} placeholder="Ex.: Cozinha" value={name} onChange={(event) => setName(event.target.value)} /></div>
+        <button className="button-primary" disabled={saving}><Plus size={16} />Adicionar</button>
+      </form>
+      {sectors.length ? <div className="sector-list">{sectors.map((sector) => <div className="sector-row" key={sector.id}><strong>{sector.name}</strong><span>{sector.employee_count} funcionários · {sector.location_count} locais</span><button type="button" className="button-danger-ghost" disabled={saving || sector.employee_count > 0 || sector.location_count > 0} onClick={() => remove(sector)}><Trash2 size={15} />Excluir</button></div>)}</div> : <p className="field-hint">Cadastre setores para organizar funcionários e locais.</p>}
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Fechar</button></footer>
+    </div>
   </Modal>;
 }
 
@@ -1190,22 +1317,28 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
   return <article className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tint}`}><Icon size={18} /></span></div><div className="stat-number">{loading ? <span className="skeleton-number" /> : value}</div><div className="stat-hint">{hint}</div></article>;
 }
 
-function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
-  const responsibleOptions = [...new Set(allLocations.map((location) => location.responsible))].sort((a, b) => a.localeCompare(b, "pt-BR"));
+function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, sectors, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
+  const [sector, setSector] = useState("");
+  const responsibleOptions = [...new Set(allLocations
+    .filter((location) => !sector || location.responsible_sector === sector)
+    .map((location) => location.responsible))]
+    .sort((a, b) => a.localeCompare(b, "pt-BR"));
+  const sectorLocations = locations.filter((location) => !sector || location.responsible_sector === sector);
   return (
     <>
       <PageHeading eyebrow="ORGANIZAÇÃO" title="Locais da empresa" description={isBoss ? "Gerencie os ambientes e acompanhe a rotina de cada um." : "Consulte os ambientes da empresa e registre as atividades sob seu usuário."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo local</button>} />
       <div className="toolbar panel">
-        <div className="toolbar-copy"><span className="result-count">{locations.length}</span><span>{locations.length === 1 ? "local" : "locais"}{locations.length !== allLocations.length ? ` de ${allLocations.length}` : ""}</span></div>
+        <div className="toolbar-copy"><span className="result-count">{sectorLocations.length}</span><span>{sectorLocations.length === 1 ? "local" : "locais"}{sectorLocations.length !== allLocations.length ? ` de ${allLocations.length}` : ""}</span></div>
         <div className="toolbar-filters">
+          {isBoss && <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setResponsible(""); }} aria-label="Filtrar por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>}
           <div className="filter-control"><Filter size={16} /><select value={frequency} onChange={(event) => setFrequency(event.target.value)} aria-label="Filtrar por frequência"><option value="">Todas as frequências</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><Users size={15} /><select value={responsible} onChange={(event) => setResponsible(event.target.value)} aria-label="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><ImagePlus size={15} /><select value={photo} onChange={(event) => setPhoto(event.target.value)} aria-label="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></select><ChevronDown size={14} /></div>
         </div>
       </div>
-      {loading && !allLocations.length ? <LoadingState /> : locations.length ? (
+      {loading && !allLocations.length ? <LoadingState /> : sectorLocations.length ? (
         <section className="location-grid">
-          {locations.map((location, index) => (
+          {sectorLocations.map((location, index) => (
             <article className="location-card" key={location.id} style={{ "--card-delay": `${index * 45}ms` }}>
               <div className="location-cover" role="button" tabIndex={0} onClick={() => onView(location)} onKeyDown={(event) => event.key === "Enter" && onView(location)}>
                 {location.photo ? <img src={location.photo} alt={`Foto de ${location.name}`} /> : <div className="cover-placeholder"><Leaf size={27} /><span>{initials(location.name)}</span></div>}
@@ -1324,13 +1457,16 @@ function ImageField({ label, value, onChange }) {
   </label>{uploadError && <span className="field-error">{uploadError}</span>}</div>;
 }
 
-function LocationForm({ item, team, saving, onClose, onSave, onDelete }) {
+function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }) {
   const [values, setValues] = useState({ name: item?.name || "", responsible: item?.responsible || "", responsible_user_id: item?.responsible_user_id || "", frequency: item?.frequency || "", photo: item?.photo || "" });
+  const [sector, setSector] = useState(item?.responsible_sector || team.find((member) =>
+    member.id === item?.responsible_user_id || member.name === item?.responsible)?.sector || "");
+  const sectorTeam = team.filter((member) => Boolean(sector) && member.sector === sector);
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   async function submit(event) {
     event.preventDefault();
-    const responsible = team.find((member) => member.id === values.responsible_user_id);
+    const responsible = sectorTeam.find((member) => member.id === values.responsible_user_id);
     if (!values.name.trim() || !responsible || !values.frequency) {
       setError("Preencha o nome do local, responsável e frequência.");
       return;
@@ -1343,7 +1479,10 @@ function LocationForm({ item, team, saving, onClose, onSave, onDelete }) {
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} />
       <div className="form-field"><label htmlFor="location-name">O que limpar <span className="required">*</span></label><input id="location-name" autoFocus maxLength={100} placeholder="Ex.: Bancada da cozinha" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-row">
-        <div className="form-field"><label htmlFor="location-responsible">Responsável e setor <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => { setSector(event.target.value); change("responsible_user_id", ""); }}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
+      </div>
+      <div className="form-row">
         <div className="form-field"><label htmlFor="location-frequency">Frequência <span className="required">*</span></label><select id="location-frequency" value={values.frequency} onChange={(event) => change("frequency", event.target.value)}><option value="">Selecione</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select></div>
       </div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}

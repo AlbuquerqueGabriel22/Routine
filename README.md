@@ -6,6 +6,7 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 
 - Cadastro de empresas com nome fantasia, identificador, e-mail e senha.
 - Cadastro de funcionários pela empresa, com setor, identificador e senha.
+- Cadastro e organização de setores por empresa; funcionários e responsáveis de locais são vinculados a um setor, e os locais podem ser filtrados por setor. A empresa pode editar o nome/setor de funcionários e alterar os dados, o prazo e o responsável das demandas pendentes.
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
 - Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado.
 - Funcionários do mesmo setor podem dar ciência e executar tarefas atribuídas uns aos outros; no histórico ficam separados o responsável original e quem realizou a execução.

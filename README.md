@@ -9,6 +9,8 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
 - Visão separada por empresa: o chefe vê os dados e a equipe da própria empresa; cada funcionário consulta os próprios registros.
 - Cadastro e manutenção de locais pela empresa; funcionários podem consultá-los e registrar atividades.
+- Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
+- Alertas visuais de prazo ficam mais urgentes conforme a data se aproxima. A empresa recebe no sino os registros de ciência e conclusão, com funcionário, setor, tarefa e prazo.
 - Histórico de atividades com data, status, observações e fotos antes/depois. Os registros não possuem operação de edição.
 - Fotos protegidas por sessão e escopo da empresa/conta.
 - Layout responsivo e instalação como aplicativo pelo navegador compatível.

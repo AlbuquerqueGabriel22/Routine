@@ -3,6 +3,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   BadgeCheck,
+  Bell,
   Building2,
   CalendarDays,
   Check,
@@ -19,6 +20,7 @@ import {
   LayoutDashboard,
   Leaf,
   LoaderCircle,
+  ListChecks,
   LogOut,
   Menu,
   MoreHorizontal,
@@ -36,10 +38,37 @@ const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
 const STATUSES = ["Limpo", "Não limpo"];
 const navItems = [
   { id: "dashboard", label: "Visão geral", icon: LayoutDashboard },
+  { id: "tasks", label: "Tarefas", icon: ListChecks },
   { id: "locations", label: "Locais", icon: Leaf },
   { id: "history", label: "Histórico", icon: ClipboardCheck },
   { id: "team", label: "Equipe", icon: Users, companyOnly: true },
 ];
+
+function formatDeadline(value) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
+}
+
+function deadlineUrgency(value, now = Date.now()) {
+  const remaining = new Date(value).getTime() - now;
+  if (remaining <= 2 * 60 * 60 * 1000) return "urgent";
+  if (remaining <= 24 * 60 * 60 * 1000) return "soon";
+  if (remaining <= 7 * 24 * 60 * 60 * 1000) return "approaching";
+  return "normal";
+}
+
+function deadlineCountdown(value, now = Date.now()) {
+  const remaining = new Date(value).getTime() - now;
+  if (remaining <= 0) return "Prazo vencido";
+  const hours = Math.floor(remaining / (60 * 60 * 1000));
+  const days = Math.floor(hours / 24);
+  if (days) return `Vence em ${days} ${days === 1 ? "dia" : "dias"}`;
+  if (hours) return `Vence em ${hours} ${hours === 1 ? "hora" : "horas"}`;
+  const minutes = Math.max(1, Math.floor(remaining / (60 * 1000)));
+  return `Vence em ${minutes} ${minutes === 1 ? "minuto" : "minutos"}`;
+}
 
 async function api(path, options = {}) {
   let response;
@@ -146,6 +175,12 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
   const [team, setTeam] = useState([]);
+  const [tasks, setTasks] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [acknowledgmentTask, setAcknowledgmentTask] = useState(null);
+  const [acknowledgmentError, setAcknowledgmentError] = useState("");
+  const [taskNow, setTaskNow] = useState(Date.now());
   const [dashboard, setDashboard] = useState(null);
   const [query, setQuery] = useState("");
   const [frequencyFilter, setFrequencyFilter] = useState("");
@@ -163,16 +198,20 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     setLoading(true);
     setPageError("");
     try {
-      const [locationRows, historyRows, dashboardData, teamRows] = await Promise.all([
+      const [locationRows, historyRows, dashboardData, teamRows, taskRows, notificationRows] = await Promise.all([
         api("/locations"),
         api("/history"),
         api("/dashboard"),
         isBoss ? api("/users") : Promise.resolve([]),
+        api("/tasks"),
+        isBoss ? api("/notifications") : Promise.resolve([]),
       ]);
       setLocations(locationRows);
       setHistory(historyRows);
       setDashboard(dashboardData);
       setTeam(teamRows);
+      setTasks(taskRows);
+      setNotifications(notificationRows);
     } catch (error) {
       if (error.status === 401) {
         await onLogout();
@@ -187,6 +226,34 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setTaskNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (isBoss) return;
+    const pending = tasks.find((task) => !task.acknowledged_at && !task.completed_at) || null;
+    setAcknowledgmentTask((current) => current?.id === pending?.id ? current : pending);
+  }, [isBoss, tasks]);
+
+  useEffect(() => {
+    const timer = window.setInterval(async () => {
+      try {
+        const [taskRows, notificationRows] = await Promise.all([
+          api("/tasks"),
+          isBoss ? api("/notifications") : Promise.resolve([]),
+        ]);
+        setTasks(taskRows);
+        setNotifications(notificationRows);
+      } catch (error) {
+        if (error.status === 401) await onLogout();
+        else setPageError(error.message);
+      }
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [isBoss, onLogout]);
 
   useEffect(() => {
     function focusSearch(event) {
@@ -251,6 +318,60 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }
 
+  async function saveTask(values) {
+    setSaving(true);
+    try {
+      await api("/tasks", { method: "POST", body: JSON.stringify(values) });
+      setModal(null);
+      setToast("Tarefa criada e atribuída.");
+      await refresh();
+    } catch (error) {
+      throw error;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function acknowledgeTask(task) {
+    setAcknowledgmentError("");
+    try {
+      const result = await api(`/tasks/${task.id}/acknowledge`, { method: "POST" });
+      setTasks((current) => current.map((item) => item.id === task.id
+        ? { ...item, acknowledged_at: result.acknowledged_at }
+        : item));
+      setToast("Ciência registrada.");
+      await refresh();
+    } catch (error) {
+      setAcknowledgmentError(error.message);
+    }
+  }
+
+  async function completeTask(task) {
+    try {
+      const result = await api(`/tasks/${task.id}/complete`, { method: "POST" });
+      setTasks((current) => current.map((item) => item.id === task.id
+        ? { ...item, completed_at: result.completed_at }
+        : item));
+      setToast("Tarefa concluída.");
+      await refresh();
+    } catch (error) {
+      setToast(error.message);
+    }
+  }
+
+  async function readNotification(notification) {
+    try {
+      await api(`/notifications/${notification.id}/read`, { method: "POST" });
+      setNotifications((current) => current.map((item) => item.id === notification.id
+        ? { ...item, read_at: new Date().toISOString() }
+        : item));
+    } catch (error) {
+      setPageError(error.message);
+    }
+  }
+
+  const unreadNotifications = notifications.filter((item) => !item.read_at).length;
+
   async function removeItem(kind, id) {
     const label = kind === "locations" ? "este local e todo o histórico relacionado" : "este registro";
     if (!window.confirm(`Tem certeza de que deseja excluir ${label}? Esta ação não pode ser desfeita.`)) return;
@@ -289,6 +410,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
               {id === "history" && history.length > 0 && <span className="nav-count">{history.length}</span>}
+              {id === "tasks" && tasks.some((task) => !task.completed_at) && <span className="nav-count">{tasks.filter((task) => !task.completed_at).length}</span>}
             </button>
           ))}
         </nav>
@@ -324,7 +446,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder={page === "history" ? "Buscar no histórico..." : page === "locations" ? "Buscar locais..." : "Buscar..."}
+                placeholder={page === "history" ? "Buscar no histórico..." : page === "locations" ? "Buscar locais..." : page === "tasks" ? "Buscar tarefas..." : "Buscar..."}
                 aria-label="Buscar"
               />
               {query && <button type="button" className="search-clear" onClick={() => setQuery("")} aria-label="Limpar busca"><X size={14} /></button>}
@@ -334,6 +456,38 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               <LoaderCircle size={16} className={loading ? "spin" : ""} />
               <span>Atualizar</span>
             </button>
+            {isBoss && (
+              <div className="notification-wrap">
+                <button
+                  className={`icon-button notification-button ${unreadNotifications ? "has-unread" : ""}`}
+                  onClick={() => setNotificationsOpen((open) => !open)}
+                  aria-label={`Notificações${unreadNotifications ? `: ${unreadNotifications} não lidas` : ""}`}
+                  aria-expanded={notificationsOpen}
+                  title="Notificações"
+                >
+                  <Bell size={18} />
+                  {unreadNotifications > 0 && <span className="notification-count">{unreadNotifications > 99 ? "99+" : unreadNotifications}</span>}
+                </button>
+                {notificationsOpen && (
+                  <section className="notification-popover" aria-label="Notificações da empresa">
+                    <div className="notification-heading"><strong>Notificações</strong><span>{unreadNotifications} não lidas</span></div>
+                    {notifications.length ? notifications.map((notification) => (
+                      <article className={`notification-item ${notification.read_at ? "read" : ""}`} key={notification.id}>
+                        <span className={`notification-event ${notification.event_type}`}>
+                          {notification.event_type === "completed" ? <Check size={14} /> : <CheckCircle2 size={14} />}
+                        </span>
+                        <div className="notification-copy">
+                          <strong>{notification.event_type === "completed" ? "Tarefa concluída" : "Ciência registrada"}</strong>
+                          <p>{notification.actor_name || "Funcionário"} · setor {notification.actor_sector || "—"} {notification.event_type === "completed" ? "concluiu" : "deu ciência de"} “{notification.task_title}” · prazo {formatDeadline(notification.deadline)}</p>
+                          <small>{formatDeadline(notification.created_at)}</small>
+                        </div>
+                        {!notification.read_at && <button className="notification-read" onClick={() => readNotification(notification)}>Marcar como lida</button>}
+                      </article>
+                    )) : <div className="notification-empty">Ainda não há notificações.</div>}
+                  </section>
+                )}
+              </div>
+            )}
             {installPrompt && <button className="install-button" onClick={onInstall}><Download size={15} /><span>Instalar app</span></button>}
             <div className="top-avatar" title={account.name}>{initials(account.name)}</div>
           </div>
@@ -382,6 +536,16 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               onView={(item) => setModal({ type: "record", item })}
             />
           )}
+          {page === "tasks" && (
+            <TasksPage
+              tasks={tasks.filter((task) => `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector}`.toLowerCase().includes(query.toLowerCase()))}
+              loading={loading}
+              isBoss={isBoss}
+              now={taskNow}
+              onCreate={() => setModal({ type: "task" })}
+              onComplete={completeTask}
+            />
+          )}
           {page === "team" && isBoss && (
             <TeamPage
               team={team}
@@ -395,6 +559,14 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       </main>
 
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
+      {acknowledgmentTask && !isBoss && (
+        <AcknowledgmentDialog
+          task={acknowledgmentTask}
+          now={taskNow}
+          error={acknowledgmentError}
+          onAcknowledge={() => acknowledgeTask(acknowledgmentTask)}
+        />
+      )}
       {modal?.type === "location" && (
         <LocationForm
           item={modal.item}
@@ -412,6 +584,14 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           saving={saving}
           onClose={() => setModal(null)}
           onSave={saveCleaning}
+        />
+      )}
+      {modal?.type === "task" && (
+        <TaskForm
+          team={team}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onSave={saveTask}
         />
       )}
       {modal?.type === "user" && (
@@ -556,6 +736,130 @@ function TeamPage({ team, loading, company, onAdd }) {
         ) : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e registrar as próprias atividades." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
       </section>
     </>
+  );
+}
+
+function TasksPage({ tasks, loading, isBoss, now, onCreate, onComplete }) {
+  const pending = tasks.filter((task) => !task.completed_at);
+  const completed = tasks.filter((task) => task.completed_at);
+  return (
+    <>
+      <PageHeading
+        eyebrow={isBoss ? "GESTÃO DA EQUIPE" : "SUA ROTINA"}
+        title="Tarefas com prazo"
+        description={isBoss
+          ? "Atribua tarefas, acompanhe a ciência da equipe e confira as conclusões."
+          : "Acompanhe os prazos das tarefas atribuídas a você."}
+        action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
+      />
+      {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at) && (
+        <div className="task-reminder"><CircleAlert size={17} /> Você tem uma tarefa que precisa de ciência. Confirme o aviso para continuar.</div>
+      )}
+      <section className="task-section">
+        <div className="section-head"><div><h2>Em andamento</h2><p>{pending.length} {pending.length === 1 ? "tarefa pendente" : "tarefas pendentes"}</p></div></div>
+        {loading && !tasks.length ? <LoadingState /> : pending.length ? (
+          <div className="task-list">
+            {pending.map((task) => {
+              const urgency = deadlineUrgency(task.deadline, now);
+              return (
+                <article className="panel task-card" key={task.id}>
+                  <div className={`task-alert ${urgency}`} aria-label={urgency === "urgent" ? "Prazo urgente" : "Prazo da tarefa"}>
+                    <CircleAlert size={19} />
+                  </div>
+                  <div className="task-content">
+                    <div className="task-title-row"><h3>{task.title}</h3><span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>{task.acknowledged_at ? "Ciente" : "Aguardando ciência"}</span></div>
+                    {task.description && <p className="task-description">{task.description}</p>}
+                    <div className="task-meta">
+                      <span><Clock3 size={14} />{deadlineCountdown(task.deadline, now)} · {formatDeadline(task.deadline)}</span>
+                      <span><Users size={14} />{isBoss ? `${task.assignee_name} · ${task.assignee_sector}` : task.assignee_sector}</span>
+                    </div>
+                  </div>
+                  {!isBoss && task.acknowledged_at && (
+                    <button className="button-primary task-complete" onClick={() => onComplete(task)}>
+                      <Check size={16} /> Concluir tarefa
+                    </button>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        ) : <EmptyState className="task-empty" icon={ListChecks} title="Nenhuma tarefa pendente" description={isBoss ? "Crie uma tarefa e defina a pessoa responsável e o prazo." : "Quando a empresa atribuir uma tarefa, ela aparecerá aqui."} action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>} />}
+      </section>
+      {completed.length > 0 && (
+        <section className="task-section completed-tasks">
+          <div className="section-head"><div><h2>Concluídas</h2><p>{completed.length} {completed.length === 1 ? "tarefa concluída" : "tarefas concluídas"}</p></div></div>
+          <div className="task-list">
+            {completed.map((task) => (
+              <article className="panel task-card task-card-complete" key={task.id}>
+                <span className="task-alert completed"><Check size={18} /></span>
+                <div className="task-content">
+                  <div className="task-title-row"><h3>{task.title}</h3><span className="status-pill status-done">Concluída</span></div>
+                  <div className="task-meta">
+                    <span><CalendarDays size={14} />Prazo: {formatDeadline(task.deadline)}</span>
+                    <span><Users size={14} />{isBoss ? `${task.assignee_name} · ${task.assignee_sector}` : task.assignee_sector}</span>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+function TaskForm({ team, saving, onClose, onSave }) {
+  const defaultDeadline = new Date(Date.now() + 60 * 60 * 1000);
+  const localDeadline = new Date(defaultDeadline.getTime() - defaultDeadline.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
+  const [values, setValues] = useState({ title: "", description: "", assigned_user_id: "", deadline: localDeadline });
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!team.length) {
+      setError("Cadastre um funcionário antes de criar uma tarefa.");
+      return;
+    }
+    setError("");
+    try {
+      await onSave({ ...values, title: values.title.trim(), deadline: new Date(values.deadline).toISOString() });
+    } catch (saveError) {
+      setError(saveError.message);
+    }
+  }
+
+  return <Modal title="Nova tarefa" subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required value={values.assigned_user_id} onChange={(event) => setValues({ ...values, assigned_user_id: event.target.value })}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
+      <div className="form-field"><label htmlFor="task-deadline">Prazo final — data e hora <span className="required">*</span></label><input id="task-deadline" type="datetime-local" required value={values.deadline} onChange={(event) => setValues({ ...values, deadline: event.target.value })} /><small className="field-hint">O horário será salvo com o fuso local e exibido para a equipe.</small></div>
+      <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !team.length}>{saving && <LoaderCircle size={16} className="spin" />}Criar tarefa</button></footer>
+    </form>
+  </Modal>;
+}
+
+function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
+  return (
+    <div className="modal-backdrop acknowledgment-backdrop">
+      <section className="modal acknowledgment-modal" role="dialog" aria-modal="true" aria-labelledby="acknowledgment-title">
+        <div className="acknowledgment-symbol"><CircleAlert size={24} /></div>
+        <div className="eyebrow">TAREFA COM PRAZO</div>
+        <h2 id="acknowledgment-title">Confirme que você viu</h2>
+        <p className="acknowledgment-intro">A empresa atribuiu uma tarefa a você. Para continuar usando o aplicativo, confirme que tomou ciência do prazo.</p>
+        <div className={`acknowledgment-task ${deadlineUrgency(task.deadline, now)}`}>
+          <strong>{task.title}</strong>
+          {task.description && <p>{task.description}</p>}
+          <span>{task.assignee_sector} · prazo {formatDeadline(task.deadline)}</span>
+          <b><CircleAlert size={15} />{deadlineCountdown(task.deadline, now)}</b>
+        </div>
+        {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+        <button className="button-primary acknowledgment-button" onClick={onAcknowledge}><Check size={17} /> Estou ciente</button>
+      </section>
+    </div>
   );
 }
 

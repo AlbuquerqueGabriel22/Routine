@@ -138,6 +138,26 @@ def initialize_database():
                 owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                assigned_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                deadline TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                acknowledged_at TEXT,
+                completed_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS company_notifications (
+                id TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+                actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL CHECK (event_type IN ('acknowledged', 'completed')),
+                created_at TEXT NOT NULL,
+                read_at TEXT
+            );
             """
         )
         # Existing prototype data stays unassigned and is never exposed to a new tenant.
@@ -158,6 +178,12 @@ def initialize_database():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_users_company ON users(company_id, name)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_assignee_deadline ON tasks(assigned_user_id, deadline)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_company_date ON company_notifications(company_id, created_at DESC)"
         )
 
 
@@ -243,6 +269,35 @@ class CleaningInput(BaseModel):
     @classmethod
     def clean_notes(cls, value: str) -> str:
         return value.strip()
+
+
+class TaskInput(BaseModel):
+    assigned_user_id: str
+    title: Annotated[str, Field(min_length=2, max_length=120)]
+    description: Annotated[str, Field(max_length=1000)] = ""
+    deadline: datetime
+
+    @field_validator("title")
+    @classmethod
+    def clean_task_title(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("O título da tarefa não pode ficar vazio.")
+        return cleaned
+
+    @field_validator("description")
+    @classmethod
+    def clean_task_description(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("deadline")
+    @classmethod
+    def validate_deadline(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("O prazo precisa incluir o fuso horário.")
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("O prazo deve ser uma data e hora futuras.")
+        return value.astimezone(timezone.utc)
 
 
 def hash_password(password: str) -> str:
@@ -555,6 +610,158 @@ def create_user(payload: UserInput, session: dict = Depends(company_only)):
         "username": payload.username,
         "login": f'{payload.username}.{company["company_handle"]}.routine',
     }
+
+
+@app.get("/api/tasks")
+def list_tasks(session: dict = Depends(current_session)):
+    clauses = ["t.company_id = ?"]
+    params: list[str] = [session["company_id"]]
+    if session["role"] == "user":
+        clauses.append("t.assigned_user_id = ?")
+        params.append(session["account_id"])
+    with connection() as conn:
+        rows = conn.execute(
+            f"""SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector
+                FROM tasks t
+                JOIN users u ON u.id = t.assigned_user_id
+                WHERE {' AND '.join(clauses)}
+                ORDER BY CASE WHEN t.completed_at IS NULL THEN 0 ELSE 1 END,
+                    t.deadline ASC""",
+            params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/tasks", status_code=201)
+def create_task(payload: TaskInput, session: dict = Depends(company_only)):
+    task_id = str(uuid.uuid4())
+    with connection() as conn:
+        assignee = conn.execute(
+            "SELECT id FROM users WHERE id = ? AND company_id = ?",
+            (payload.assigned_user_id, session["company_id"]),
+        ).fetchone()
+        if assignee is None:
+            raise HTTPException(status_code=404, detail="Funcionário não encontrado nesta empresa.")
+        conn.execute(
+            """INSERT INTO tasks
+                (id, company_id, assigned_user_id, title, description, deadline, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                task_id,
+                session["company_id"],
+                payload.assigned_user_id,
+                payload.title,
+                payload.description,
+                payload.deadline.isoformat(timespec="seconds"),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+        row = conn.execute(
+            """SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector
+                FROM tasks t JOIN users u ON u.id = t.assigned_user_id
+                WHERE t.id = ?""",
+            (task_id,),
+        ).fetchone()
+    return dict(row)
+
+
+@app.post("/api/tasks/{task_id}/acknowledge")
+def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode dar ciência.")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        cursor = conn.execute(
+            """UPDATE tasks SET acknowledged_at = ?
+                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                    AND acknowledged_at IS NULL AND completed_at IS NULL""",
+            (now, task_id, session["company_id"], session["account_id"]),
+        )
+        if cursor.rowcount == 0:
+            existing = conn.execute(
+                """SELECT acknowledged_at FROM tasks
+                    WHERE id = ? AND company_id = ? AND assigned_user_id = ?""",
+                (task_id, session["company_id"], session["account_id"]),
+            ).fetchone()
+            if existing is None:
+                raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
+            if existing["acknowledged_at"] is None:
+                raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+            return {"id": task_id, "acknowledged_at": existing["acknowledged_at"]}
+        conn.execute(
+            """INSERT INTO company_notifications
+                (id, company_id, task_id, actor_user_id, event_type, created_at)
+                VALUES (?, ?, ?, ?, 'acknowledged', ?)""",
+            (str(uuid.uuid4()), session["company_id"], task_id, session["account_id"], now),
+        )
+    return {"id": task_id, "acknowledged_at": now}
+
+
+@app.post("/api/tasks/{task_id}/complete")
+def complete_task(task_id: str, session: dict = Depends(current_session)):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode concluir a tarefa.")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        cursor = conn.execute(
+            """UPDATE tasks SET completed_at = ?
+                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                    AND acknowledged_at IS NOT NULL AND completed_at IS NULL""",
+            (now, task_id, session["company_id"], session["account_id"]),
+        )
+        if cursor.rowcount == 0:
+            existing = conn.execute(
+                """SELECT acknowledged_at, completed_at FROM tasks
+                    WHERE id = ? AND company_id = ? AND assigned_user_id = ?""",
+                (task_id, session["company_id"], session["account_id"]),
+            ).fetchone()
+            if existing is None:
+                raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
+            if existing["completed_at"] is not None:
+                raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+            raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
+        conn.execute(
+            """INSERT INTO company_notifications
+                (id, company_id, task_id, actor_user_id, event_type, created_at)
+                VALUES (?, ?, ?, ?, 'completed', ?)""",
+            (str(uuid.uuid4()), session["company_id"], task_id, session["account_id"], now),
+        )
+    return {"id": task_id, "completed_at": now}
+
+
+@app.get("/api/notifications")
+def list_company_notifications(session: dict = Depends(company_only)):
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT n.id, n.task_id, n.event_type, n.created_at, n.read_at,
+                    t.title AS task_title, t.deadline,
+                    u.name AS actor_name, u.sector AS actor_sector
+                FROM company_notifications n
+                JOIN tasks t ON t.id = n.task_id
+                LEFT JOIN users u ON u.id = n.actor_user_id
+                WHERE n.company_id = ?
+                ORDER BY n.created_at DESC, n.rowid DESC LIMIT 100""",
+            (session["company_id"],),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.post("/api/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, session: dict = Depends(company_only)):
+    with connection() as conn:
+        cursor = conn.execute(
+            """UPDATE company_notifications SET read_at = ?
+                WHERE id = ? AND company_id = ? AND read_at IS NULL""",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), notification_id, session["company_id"]),
+        )
+        if cursor.rowcount == 0:
+            exists = conn.execute(
+                "SELECT 1 FROM company_notifications WHERE id = ? AND company_id = ?",
+                (notification_id, session["company_id"]),
+            ).fetchone()
+            if exists is None:
+                raise HTTPException(status_code=404, detail="Notificação não encontrada.")
+    return {"id": notification_id, "read": True}
 
 
 @app.post("/api/upload")

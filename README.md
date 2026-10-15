@@ -1,6 +1,6 @@
 # Routiner
 
-Aplicativo web instalável para organizar locais, equipes e registros de limpeza. A API em Python/FastAPI e a interface React usam SQLite local por padrão.
+Aplicativo web instalável para organizar locais, equipes e registros de limpeza. A API em Python/FastAPI e a interface React usam SQLite local por padrão; com `DATABASE_URL`, a API usa PostgreSQL remoto. A interface web e a API podem ser publicadas juntas no Railway para que contas e dados fiquem disponíveis em outros dispositivos.
 
 ## Recursos
 
@@ -69,6 +69,30 @@ npm run preview
 ```
 
 Abra o endereço local exibido pelo preview e use **Instalar app** quando oferecido pelo navegador, ou a opção de instalação do menu do navegador. HTTPS é necessário para instalação fora de `localhost`.
+
+## Publicar no Railway para acessar em outros dispositivos
+
+O modo local e o instalador desktop continuam usando SQLite. Para usar a mesma conta, equipe, tarefas, histórico e fotos em vários celulares/computadores, publique a aplicação web/API e conecte-a a um PostgreSQL persistente:
+
+1. Envie este repositório para o GitHub e crie um projeto no Railway a partir dele. O `Dockerfile` compila a interface e executa a API, que também serve a interface no mesmo endereço.
+2. Adicione um serviço PostgreSQL ao projeto e configure a variável `DATABASE_URL` do serviço Routiner para referenciar a URL desse banco (no Railway, use a referência de variável do serviço PostgreSQL).
+3. Adicione um volume persistente ao serviço Routiner, montado em `/data`. As fotos ficam em `/data/uploads`; sem o volume, arquivos locais do contêiner podem desaparecer em uma nova implantação.
+4. Configure `ROUTINER_AUTH_SECRET` como um segredo aleatório de pelo menos 32 caracteres. Guarde-o no Railway, não no repositório. `ROUTINER_COOKIE_SECURE=true` já é definido pelo contêiner.
+5. Gere o domínio público do serviço Routiner. Abra o endereço HTTPS em cada dispositivo e entre com o login/senha existentes no servidor. As contas, funcionários, tarefas, históricos e fotos são lidos e gravados pela API no banco/volume remoto; respostas da API e fotos não são armazenadas em cache. O navegador guarda somente um cookie de sessão seguro (não a senha) e a preferência visual da conta.
+
+O endpoint `/api/health` verifica se o banco está acessível e é usado pelo Railway para health checks. O cadastro feito depois da publicação já será criado no PostgreSQL remoto. Não coloque credenciais do PostgreSQL no frontend.
+
+### Levar os dados locais existentes para o Railway
+
+O banco SQLite do computador e as fotos atuais não são enviados automaticamente ao publicar o app: essa separação evita copiar dados sem autorização e sem escolher a base de origem. Para preservar esses registros, execute o importador **uma única vez** após a implantação, apontando-o para a cópia do banco SQLite que deseja migrar. Ele importa as contas e os registros sem substituir dados já existentes e envia as fotos pela API autenticada.
+
+Configure no terminal de migração as variáveis `DATABASE_URL` (URL pública do PostgreSQL Railway, habilitando acesso público ao banco apenas durante a migração), `ROUTINER_MIGRATION_API_URL` (domínio HTTPS do Routiner), `CLEANING_DB_PATH` (arquivo SQLite de origem) e `CLEANING_UPLOAD_DIR` (pasta `uploads` correspondente à base). Instale as dependências de `backend\requirements.txt` no ambiente Python e execute:
+
+```powershell
+.\.venv\Scripts\python.exe backend\migrate_sqlite_to_postgres.py
+```
+
+O importador solicita sem ecoar a senha de cada empresa que possui imagens, preserva os identificadores e hashes de senha existentes e faz login para carregar novamente as imagens com o escopo de empresa correto. Mantenha uma cópia de segurança do banco e da pasta de imagens original até confirmar o acesso aos dados no endereço publicado. Se já houver contas/dados na base Railway, linhas conflitantes não são sobrescritas.
 
 ## Gerar instalador para Windows
 

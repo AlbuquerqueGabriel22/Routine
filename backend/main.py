@@ -22,9 +22,11 @@ from pydantic import BaseModel, Field, field_validator
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("CLEANING_DB_PATH", BASE_DIR / "cleaning.db"))
+DATABASE_URL = os.environ.get("DATABASE_URL") or os.environ.get("CLEANING_DATABASE_URL")
 UPLOAD_DIR = Path(os.environ.get("CLEANING_UPLOAD_DIR", BASE_DIR / "uploads"))
 AUTH_SECRET_PATH = Path(os.environ.get("ROUTINER_AUTH_SECRET_FILE", BASE_DIR / ".auth_secret"))
 STATIC_DIR = os.environ.get("ROUTINER_STATIC_DIR")
+COOKIE_SECURE = os.environ.get("ROUTINER_COOKIE_SECURE", "").lower() == "true"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FREQUENCIES = {"Diário", "Semanal", "Quinzenal", "Mensal"}
@@ -69,12 +71,85 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.middleware("http")
+async def prevent_private_data_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(("/api/", "/uploads/")):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+class HybridRow(dict):
+    def __init__(self, names, values):
+        super().__init__(zip(names, values))
+        self._values = values
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+def postgres_row_factory(cursor):
+    if cursor.description is None:
+        return tuple
+    names = [column.name for column in cursor.description]
+    return lambda values: HybridRow(names, values)
+
+
+class PostgresConnection:
+    def __init__(self, raw_connection):
+        self.raw_connection = raw_connection
+
+    def execute(self, sql, parameters=None):
+        statement = sql.replace(" COLLATE NOCASE", "").replace("?", "%s")
+        statement = re.sub(r"\bLIKE\b", "ILIKE", statement, flags=re.IGNORECASE)
+        try:
+            if parameters is None:
+                return self.raw_connection.execute(statement)
+            return self.raw_connection.execute(statement, parameters)
+        except Exception as error:
+            import psycopg
+
+            if isinstance(error, psycopg.IntegrityError):
+                raise sqlite3.IntegrityError(str(error)) from error
+            raise
+
+    def executescript(self, sql):
+        for statement in sql.replace(" COLLATE NOCASE", "").split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def commit(self):
+        self.raw_connection.commit()
+
+    def rollback(self):
+        self.raw_connection.rollback()
+
+    def close(self):
+        self.raw_connection.close()
+
+
 @contextmanager
 def connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    if DATABASE_URL:
+        import psycopg
+
+        database_url = DATABASE_URL
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        raw_connection = psycopg.connect(database_url, row_factory=postgres_row_factory)
+        conn = PostgresConnection(raw_connection)
+    else:
+        raw_connection = sqlite3.connect(DB_PATH)
+        raw_connection.row_factory = sqlite3.Row
+        conn = raw_connection
+    if not DATABASE_URL:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
     try:
         yield conn
         conn.commit()
@@ -87,7 +162,17 @@ def connection():
 
 def add_column_if_missing(conn: sqlite3.Connection, table: str, definition: str):
     column_name = definition.split()[0]
-    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if DATABASE_URL:
+        existing = {
+            row["column_name"]
+            for row in conn.execute(
+                """SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = current_schema() AND table_name = ?""",
+                (table,),
+            )
+        }
+    else:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column_name not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
 
@@ -189,13 +274,24 @@ def initialize_database():
                 )
                 WHERE responsible_user_id IS NULL"""
         )
-        conn.execute(
-            """INSERT OR IGNORE INTO sectors (id, company_id, name, created_at)
-                SELECT lower(hex(randomblob(16))), company_id, trim(sector), ?
-                FROM users WHERE trim(sector) != ''
-                GROUP BY company_id, lower(trim(sector))""",
-            (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
-        )
+        if DATABASE_URL:
+            conn.execute(
+                """INSERT INTO sectors (id, company_id, name, created_at)
+                    SELECT md5(random()::text || clock_timestamp()::text),
+                        company_id, trim(sector), ?
+                    FROM users WHERE trim(sector) != ''
+                    GROUP BY company_id, lower(trim(sector)), trim(sector)
+                    ON CONFLICT DO NOTHING""",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
+            )
+        else:
+            conn.execute(
+                """INSERT OR IGNORE INTO sectors (id, company_id, name, created_at)
+                    SELECT lower(hex(randomblob(16))), company_id, trim(sector), ?
+                    FROM users WHERE trim(sector) != ''
+                    GROUP BY company_id, lower(trim(sector))""",
+                (datetime.now(timezone.utc).isoformat(timespec="seconds"),),
+            )
         add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
@@ -467,7 +563,11 @@ def set_session_cookie(response: Response, request: Request, account: dict):
         encode_session(payload),
         max_age=SESSION_SECONDS,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=(
+            request.url.scheme == "https"
+            or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+            or COOKIE_SECURE
+        ),
         samesite="lax",
         path="/",
     )
@@ -541,11 +641,11 @@ def require_location_access(conn: sqlite3.Connection, location_id: str, session:
         location["responsible_user_id"] is None
         or conn.execute(
             """SELECT 1 FROM users responsible
-                JOIN users current_user
-                    ON current_user.company_id = responsible.company_id
-                    AND current_user.id = ?
+                JOIN users active_user
+                    ON active_user.company_id = responsible.company_id
+                    AND active_user.id = ?
                 WHERE responsible.id = ? AND responsible.company_id = ?
-                    AND lower(trim(responsible.sector)) = lower(trim(current_user.sector))""",
+                    AND lower(trim(responsible.sector)) = lower(trim(active_user.sector))""",
             (
                 session["account_id"],
                 location["responsible_user_id"],
@@ -599,6 +699,8 @@ def register_identifier(account: dict) -> dict:
 
 @app.get("/api/health")
 def health():
+    with connection() as conn:
+        conn.execute("SELECT 1")
     return {"status": "ok"}
 
 
@@ -896,8 +998,8 @@ def list_tasks(session: dict = Depends(current_session)):
     if session["role"] == "user":
         clauses.append(
             """lower(trim(u.sector)) = lower(trim((
-                SELECT current_user.sector FROM users current_user
-                WHERE current_user.id = ? AND current_user.company_id = ?
+                SELECT active_user.sector FROM users active_user
+                WHERE active_user.id = ? AND active_user.company_id = ?
             )))"""
         )
         params.extend([session["account_id"], session["company_id"]])
@@ -990,7 +1092,7 @@ def update_task(
                 payload.title,
                 payload.description,
                 deadline,
-                int(changed),
+                changed,
                 task_id,
                 session["company_id"],
             ),
@@ -1014,12 +1116,12 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
     with connection() as conn:
         task = conn.execute(
             """SELECT t.acknowledged_at, t.completed_at, assigned.sector AS assignee_sector,
-                    current_user.sector AS current_sector
+                    active_user.sector AS current_sector
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
-                JOIN users current_user ON current_user.id = ?
+                JOIN users active_user ON active_user.id = ?
                 WHERE t.id = ? AND t.company_id = ?
-                    AND assigned.company_id = ? AND current_user.company_id = ?""",
+                    AND assigned.company_id = ? AND active_user.company_id = ?""",
             (
                 session["account_id"],
                 task_id,
@@ -1070,12 +1172,12 @@ def complete_task(
         task = conn.execute(
             """SELECT t.assigned_user_id, t.acknowledged_at, t.completed_at,
                     assigned.sector AS assignee_sector,
-                    current_user.sector AS current_sector
+                    active_user.sector AS current_sector
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
-                JOIN users current_user ON current_user.id = ?
+                JOIN users active_user ON active_user.id = ?
                 WHERE t.id = ? AND t.company_id = ?
-                    AND assigned.company_id = ? AND current_user.company_id = ?""",
+                    AND assigned.company_id = ? AND active_user.company_id = ?""",
             (
                 session["account_id"],
                 task_id,
@@ -1468,8 +1570,8 @@ def list_history(
         if session["role"] == "user":
             task_clauses.append(
                 """lower(trim(assigned.sector)) = lower(trim((
-                    SELECT current_user.sector FROM users current_user
-                    WHERE current_user.id = ? AND current_user.company_id = ?
+                    SELECT active_user.sector FROM users active_user
+                    WHERE active_user.id = ? AND active_user.company_id = ?
                 )))"""
             )
             task_params.extend([session["account_id"], session["company_id"]])

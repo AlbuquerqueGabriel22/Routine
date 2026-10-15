@@ -18,6 +18,7 @@ TABLES = (
     "users",
     "sectors",
     "locations",
+    "task_schedules",
     "cleanings",
     "tasks",
     "company_notifications",

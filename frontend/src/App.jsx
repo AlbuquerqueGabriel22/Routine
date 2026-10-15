@@ -42,6 +42,7 @@ import {
 
 const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
 const STATUSES = ["Limpo", "Não limpo"];
+const WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
 const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase("pt-BR")
   === String(right || "").trim().toLocaleLowerCase("pt-BR");
 const navItems = [
@@ -112,6 +113,23 @@ function formatDate(value) {
   );
 }
 
+function formatDateTime(value) {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" })
+    .format(new Date(value));
+}
+
+function scheduleDescription(scheduleDays, scheduleTime) {
+  let days = [];
+  try {
+    days = Array.isArray(scheduleDays) ? scheduleDays : JSON.parse(scheduleDays || "[]");
+  } catch {
+    return "Rotina não configurada";
+  }
+  const selectedDays = days.map((day) => WEEKDAYS[day]).filter(Boolean).join(", ");
+  return selectedDays ? `${selectedDays} · ${scheduleTime || "23:59"}` : "Rotina não configurada";
+}
+
 function todayValue() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
@@ -122,7 +140,7 @@ function initials(name = "") {
 }
 
 function defaultAppearance() {
-  return { theme: "system", accent: "#557c68" };
+  return { theme: "system", accent: "#2563eb" };
 }
 
 function appearanceStorageKey(account) {
@@ -192,7 +210,12 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [appearanceOpen, setAppearanceOpen] = useState(false);
   const [appearance, setAppearance] = useState(() => {
     try {
-      return { ...defaultAppearance(), ...JSON.parse(localStorage.getItem(appearanceStorageKey(account)) || "{}") };
+      const saved = JSON.parse(localStorage.getItem(appearanceStorageKey(account)) || "{}");
+      return {
+        ...defaultAppearance(),
+        ...saved,
+        accent: saved.accent === "#557c68" ? "#2563eb" : saved.accent || defaultAppearance().accent,
+      };
     } catch {
       return defaultAppearance();
     }
@@ -273,7 +296,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   useEffect(() => {
     if (isBoss) return;
-    const pending = tasks.find((task) => !task.acknowledged_at && !task.completed_at) || null;
+    const pending = tasks.find((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) || null;
     setAcknowledgmentTask((current) => current?.id === pending?.id ? current : pending);
   }, [isBoss, tasks]);
 
@@ -322,7 +345,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   const visibleHistory = useMemo(() => history.filter((entry) => {
     const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.executor_name || ""} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
-    return matchesQuery && (!statusFilter || entry.status === statusFilter);
+    const matchesStatus = !statusFilter
+      || (statusFilter === "Concluída" && ["Concluída", "Limpo"].includes(entry.status))
+      || entry.status === statusFilter;
+    return matchesQuery && matchesStatus;
   }), [history, query, statusFilter]);
 
   async function saveLocation(values, id) {
@@ -443,12 +469,15 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const unreadNotifications = notifications.filter((item) => !item.read_at).length;
 
   async function removeItem(kind, id) {
-    const label = kind === "locations" ? "este local e todo o histórico relacionado" : "este registro";
+    const label = kind === "locations"
+      ? "este local e todo o histórico relacionado"
+      : kind === "missed-task" ? "esta tarefa vencida do histórico" : "este registro";
     if (!window.confirm(`Tem certeza de que deseja excluir ${label}? Esta ação não pode ser desfeita.`)) return;
     try {
-      await api(`/${kind}/${id}`, { method: "DELETE" });
+      const path = kind === "missed-task" ? `/tasks/${id}/missed` : `/${kind}/${id}`;
+      await api(path, { method: "DELETE" });
       setModal(null);
-      setToast(kind === "locations" ? "Local excluído." : "Registro excluído.");
+      setToast(kind === "locations" ? "Local excluído." : kind === "missed-task" ? "Tarefa removida do histórico." : "Registro excluído.");
       await refresh();
     } catch (error) {
       setToast(error.message);
@@ -480,7 +509,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               <Icon size={18} strokeWidth={1.8} />
               <span>{label}</span>
               {id === "history" && history.length > 0 && <span className="nav-count">{history.length}</span>}
-              {id === "tasks" && tasks.some((task) => !task.completed_at) && <span className="nav-count">{tasks.filter((task) => !task.completed_at).length}</span>}
+              {id === "tasks" && tasks.some((task) => !task.completed_at && !task.missed_at) && <span className="nav-count">{tasks.filter((task) => !task.completed_at && !task.missed_at).length}</span>}
             </button>
           ))}
         </nav>
@@ -636,6 +665,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           {page === "team" && isBoss && (
             <TeamPage
               team={team}
+              sectors={sectors}
               loading={loading}
               company={account.company}
               tasks={tasks}
@@ -775,8 +805,12 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "record" && (
         <RecordDialog
           item={modal.item}
+          isBoss={isBoss}
           onClose={() => setModal(null)}
-          onDelete={() => removeItem("history", modal.item.id)}
+          onDelete={() => removeItem(
+            modal.item.record_type === "task" ? "missed-task" : "history",
+            modal.item.record_type === "task" ? modal.item.task_id : modal.item.id,
+          )}
         />
       )}
       {modal?.type === "location-detail" && (
@@ -880,18 +914,30 @@ function AuthPage({ initialError, onAuthenticated }) {
   );
 }
 
-function TeamPage({ team, loading, company, tasks, onManageSectors, onAdd, onEdit }) {
+function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onAdd, onEdit }) {
+  const [sector, setSector] = useState("");
+  const [pendingFilter, setPendingFilter] = useState("");
+  const visibleTeam = team.filter((member) => {
+    const memberTasks = tasks.filter((task) => task.assigned_user_id === member.id);
+    const hasPending = memberTasks.some((task) => !task.completed_at && !task.missed_at);
+    return (!sector || sameSector(member.sector, sector))
+      && (!pendingFilter || (pendingFilter === "pending" ? hasPending : !hasPending));
+  });
   return (
     <>
       <PageHeading eyebrow="ADMINISTRAÇÃO DA EMPRESA" title="Sua equipe" description="Gerencie setores, funcionários e demandas atribuídas." action={<div className="heading-actions"><button className="button-secondary" onClick={onManageSectors}><Settings size={16} /> Setores</button><button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar funcionário</button></div>} />
       <section className="company-summary panel"><div className="company-symbol"><Building2 size={20} /></div><div><span>EMPRESA</span><strong>{company.fantasy_name}</strong><small>Login: {company.company_handle}.routine · {company.email}</small></div><span className="admin-badge"><BadgeCheck size={14} /> Administrador</span></section>
       <section className="panel team-panel">
-        <div className="section-head"><div><h2>Contas de funcionários</h2><p>Funcionários veem apenas os registros criados pela própria conta.</p></div><span className="result-count">{team.length}</span></div>
-        {loading && !team.length ? <LoadingState /> : team.length ? (
+        <div className="section-head"><div><h2>Contas de funcionários</h2><p>Funcionários veem as tarefas e o histórico do próprio setor.</p></div><span className="result-count">{visibleTeam.length}</span></div>
+        <div className="toolbar-filters team-filters">
+          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar equipe por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Filter size={15} /><select value={pendingFilter} onChange={(event) => setPendingFilter(event.target.value)} aria-label="Filtrar equipe por pendências"><option value="">Todas as situações</option><option value="pending">Com pendências</option><option value="clear">Sem pendências</option></select><ChevronDown size={14} /></div>
+        </div>
+        {loading && !team.length ? <LoadingState /> : visibleTeam.length ? (
           <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
-            {team.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td>{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at).length} pendentes</td><td><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
+            {visibleTeam.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td>{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at && !task.missed_at).length} pendentes</td><td><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
           </tbody></table></div>
-        ) : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e registrar as próprias atividades." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
+        ) : team.length ? <EmptyState className="team-empty" icon={Filter} title="Nenhum funcionário neste filtro" description="Altere os filtros de setor ou de pendências para ver a equipe." /> : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e acompanhar as atividades do setor." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
       </section>
     </>
   );
@@ -900,8 +946,8 @@ function TeamPage({ team, loading, company, tasks, onManageSectors, onAdd, onEdi
 function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onComplete }) {
   const [sector, setSector] = useState("");
   const sectorTasks = tasks.filter((task) => !isBoss || !sector || sameSector(task.assignee_sector, sector));
-  const pending = sectorTasks.filter((task) => !task.completed_at);
-  const completed = sectorTasks.filter((task) => task.completed_at);
+  const pending = sectorTasks.filter((task) => !task.completed_at && !task.missed_at);
+  const completed = sectorTasks.filter((task) => task.completed_at || task.missed_at);
   return (
     <>
       <PageHeading
@@ -913,7 +959,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
         action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
       />
       {isBoss && <div className="toolbar panel"><div className="toolbar-copy"><span className="result-count">{sectorTasks.length}</span><span>{sectorTasks.length === 1 ? "tarefa" : "tarefas"}</span></div><div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div></div>}
-      {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at) && (
+      {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) && (
         <div className="task-reminder"><CircleAlert size={17} /> Você tem uma tarefa que precisa de ciência. Confirme o aviso para continuar.</div>
       )}
       <section className="task-section">
@@ -949,15 +995,15 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
       </section>
       {completed.length > 0 && (
         <section className="task-section completed-tasks">
-          <div className="section-head"><div><h2>Concluídas</h2><p>{completed.length} {completed.length === 1 ? "tarefa concluída" : "tarefas concluídas"}</p></div></div>
+          <div className="section-head"><div><h2>Concluídas e vencidas</h2><p>{completed.length} {completed.length === 1 ? "registro" : "registros"} finalizados</p></div></div>
           <div className="task-list">
             {completed.map((task) => (
               <article className="panel task-card task-card-complete" key={task.id}>
-                <span className="task-alert completed"><Check size={18} /></span>
+                <span className={`task-alert ${task.missed_at ? "urgent" : "completed"}`}>{task.missed_at ? <CircleAlert size={18} /> : <Check size={18} />}</span>
                 <div className="task-content">
-                  <div className="task-title-row"><h3>{task.title}</h3><span className="status-pill status-done">Concluída</span></div>
+                  <div className="task-title-row"><h3>{task.title}</h3><span className={`status-pill ${task.missed_at ? "status-attention" : "status-done"}`}>{task.missed_at ? "Não feito" : "Concluída"}</span></div>
                   <div className="task-meta">
-                    <span><CalendarDays size={14} />Prazo: {formatDeadline(task.deadline)}</span>
+                    <span><CalendarDays size={14} />{task.missed_at ? "Venceu" : "Concluída"}: {formatDeadline(task.missed_at || task.completed_at)}</span>
                     <span><Users size={14} />Responsável: {task.assignee_name}{task.completed_by_name ? ` · Execução: ${task.completed_by_name}` : ""}</span>
                   </div>
                 </div>
@@ -1363,7 +1409,7 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
               </div>
               <div className="location-card-body">
                 <button className="location-name-button" onClick={() => onView(location)}><h3>{location.name}</h3><ArrowUpRight size={16} /></button>
-                <div className="location-meta"><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{location.frequency}</span></div>
+                <div className="location-meta"><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time)}</span></div>
                 <div className="location-card-bottom"><span>{location.cleaning_count === 1 ? "1 registro" : `${location.cleaning_count || 0} registros`} · {formatDate(location.last_cleaned)}</span><button className="text-button compact" onClick={() => onAddCleaning(location)}><Plus size={14} /> Registrar</button></div>
               </div>
             </article>
@@ -1386,18 +1432,19 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
         <div className="toolbar-copy"><span className="result-count">{filteredEntries.length}</span><span>{filteredEntries.length === 1 ? "registro" : "registros"}</span></div>
         <div className="toolbar-filters">
           {isBoss && <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>}
-          <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos os status</option>{[...STATUSES, "Concluída"].map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos</option><option value="Concluída">Concluídas</option><option value="Não feito">Não feitas</option></select><ChevronDown size={14} /></div>
         </div>
       </div>
       <section className="panel history-panel">
         {loading && !entries.length ? <LoadingState /> : filteredEntries.length ? (
           <div className="table-scroll"><table className="history-table">
-            <thead><tr><th>LOCAL</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>DATA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
+            <thead><tr><th>ÁREA</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>SETOR</th><th>DATA E HORA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
               <td><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
-              <td>{entry.executor_name || entry.created_by_name || "—"}</td>
-              <td>{entry.record_type === "task" ? formatDate(entry.completed_at) : formatDate(entry.cleaning_date)}</td>
+              <td>{entry.executor_name || (entry.status === "Não feito" ? "—" : entry.created_by_name) || "—"}</td>
+              <td>{entry.responsible_sector || "—"}</td>
+              <td>{formatDateTime(entry.event_at || entry.created_at)}</td>
               <td><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
               <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
               <td><button className="icon-button table-open" onClick={(event) => { event.stopPropagation(); onView(entry); }} aria-label={`Abrir registro de ${entry.location_name}`}><ChevronRight size={17} /></button></td>
@@ -1478,33 +1525,65 @@ function ImageField({ label, value, onChange }) {
 }
 
 function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }) {
-  const [values, setValues] = useState({ name: item?.name || "", responsible: item?.responsible || "", responsible_user_id: item?.responsible_user_id || "", frequency: item?.frequency || "", photo: item?.photo || "" });
+  const [values, setValues] = useState(() => {
+    let scheduleDays = [0, 1, 2, 3, 4, 5];
+    try {
+      if (item?.schedule_days) scheduleDays = JSON.parse(item.schedule_days);
+    } catch {
+      scheduleDays = [0, 1, 2, 3, 4, 5];
+    }
+    return {
+      name: item?.name || "",
+      responsible: item?.responsible || "",
+      responsible_user_id: item?.responsible_user_id || "",
+      frequency: item?.frequency || "",
+      photo: item?.photo || "",
+      schedule_days: scheduleDays,
+      schedule_time: item?.schedule_time || "23:59",
+    };
+  });
   const [sector, setSector] = useState(item?.responsible_sector || team.find((member) =>
     member.id === item?.responsible_user_id || member.name === item?.responsible)?.sector || "");
   const sectorTeam = team.filter((member) => Boolean(sector) && member.sector === sector);
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
+  function toggleDay(day) {
+    setValues((current) => ({
+      ...current,
+      schedule_days: current.schedule_days.includes(day)
+        ? current.schedule_days.filter((selected) => selected !== day)
+        : [...current.schedule_days, day].sort(),
+    }));
+  }
   async function submit(event) {
     event.preventDefault();
     const responsible = sectorTeam.find((member) => member.id === values.responsible_user_id);
-    if (!values.name.trim() || !responsible || !values.frequency) {
-      setError("Preencha o nome do local, responsável e frequência.");
+    if (!values.name.trim() || !responsible || !values.schedule_days.length) {
+      setError("Preencha a área, o responsável e ao menos um dia da rotina.");
       return;
     }
     setError("");
-    await onSave({ ...values, name: values.name.trim(), responsible: responsible.name }, item?.id);
+    await onSave({
+      ...values,
+      name: values.name.trim(),
+      sector,
+      responsible: responsible.name,
+      frequency: values.schedule_days.length === 7 ? "Diário" : "Semanal",
+    }, item?.id);
   }
   return <Modal title={item ? "Editar local" : "Novo local"} subtitle="CADASTRO DE AMBIENTE" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} />
-      <div className="form-field"><label htmlFor="location-name">O que limpar <span className="required">*</span></label><input id="location-name" autoFocus maxLength={100} placeholder="Ex.: Bancada da cozinha" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
+      <div className="form-field"><label htmlFor="location-name">Área de atuação <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Fogão, exaustor, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-row">
         <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => { setSector(event.target.value); change("responsible_user_id", ""); }}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
         <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
       </div>
-      <div className="form-row">
-        <div className="form-field"><label htmlFor="location-frequency">Frequência <span className="required">*</span></label><select id="location-frequency" value={values.frequency} onChange={(event) => change("frequency", event.target.value)}><option value="">Selecione</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select></div>
-      </div>
+      <fieldset className="schedule-days-field">
+        <legend>Dias da rotina <span className="required">*</span></legend>
+        <div className="schedule-days">{WEEKDAYS.map((label, day) => <label className={values.schedule_days.includes(day) ? "selected" : ""} key={label}><input type="checkbox" checked={values.schedule_days.includes(day)} onChange={() => toggleDay(day)} /><span>{label}</span></label>)}</div>
+      </fieldset>
+      <div className="form-field"><label htmlFor="location-schedule-time">Horário limite <span className="required">*</span></label><input id="location-schedule-time" type="time" required value={values.schedule_time} onChange={(event) => change("schedule_time", event.target.value)} /><small className="field-hint">A tarefa será criada automaticamente para cada dia selecionado. Se não for concluída até esse horário, irá para o histórico como “Não feito”.</small></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer">{item && <button type="button" className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir</button>}<span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Cadastrar local"}</button></footer>
     </form>
@@ -1546,17 +1625,21 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   </Modal>;
 }
 
-function RecordDialog({ item, onClose, onDelete }) {
+function RecordDialog({ item, isBoss, onClose, onDelete }) {
+  const isMissedTask = item.record_type === "task" && item.status === "Não feito";
+  const activityDate = item.record_type === "task"
+    ? item.completed_at || item.missed_at
+    : item.event_at || item.created_at;
   return <Modal title={item.record_type === "task" ? "Detalhes da tarefa" : "Detalhes do registro"} subtitle={item.record_type === "task" ? "HISTÓRICO DE TAREFAS" : "HISTÓRICO DE LIMPEZA"} onClose={onClose} wide>
     <div className="record-detail">
       <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"} · Execução: {item.executor_name || item.created_by_name || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
-      <div className="record-date"><CalendarDays size={17} /><span>{item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDate(item.record_type === "task" ? item.completed_at : item.cleaning_date)}</strong></div>
+      <div className="record-date"><CalendarDays size={17} /><span>{isMissedTask ? "Prazo vencido" : item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDateTime(activityDate)}</strong></div>
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">
         <PhotoView label="Foto antes" photo={item.photo_before} />
         <PhotoView label="Foto depois" photo={item.photo_after} />
       </div>
-      <footer className="modal-footer">{item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
+      <footer className="modal-footer">{(item.record_type !== "task" || (isBoss && isMissedTask)) && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> {isMissedTask ? "Remover do histórico" : "Excluir registro"}</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
 }
@@ -1569,7 +1652,7 @@ function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, 
   return <Modal title={item.name} subtitle="DETALHES DO LOCAL" onClose={onClose} wide>
     <div className="location-detail-content">
       {item.photo && <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />}
-      <div className="detail-info-grid"><div><span>O que limpar</span><strong>{item.name}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Frequência</span><strong>{item.frequency}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
+      <div className="detail-info-grid"><div><span>Área de atuação</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
       <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
       {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
       <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar local</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>

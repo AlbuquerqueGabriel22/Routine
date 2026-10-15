@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
 import uuid
-from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from contextlib import asynccontextmanager, contextmanager
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +34,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FREQUENCIES = {"Diário", "Semanal", "Quinzenal", "Mensal"}
 STATUSES = {"Limpo", "Não limpo"}
+SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("ROUTINER_TIMEZONE", "America/Sao_Paulo"))
 PASSWORD_ITERATIONS = 600_000
 SESSION_COOKIE = "routiner_session"
 SESSION_SECONDS = 60 * 60 * 12
@@ -56,7 +60,28 @@ def load_auth_secret() -> bytes:
 
 
 AUTH_SECRET = load_auth_secret()
-app = FastAPI(title="Routiner — Gestão de limpeza", version="2.0.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def app_lifespan(application: FastAPI):
+    worker = asyncio.create_task(task_schedule_worker())
+    application.state.task_schedule_worker = worker
+    try:
+        yield
+    finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(
+    title="Routiner — Gestão de limpeza",
+    version="2.0.0",
+    lifespan=app_lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -231,6 +256,16 @@ def initialize_database():
                 owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_schedules (
+                id TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                location_id TEXT NOT NULL UNIQUE REFERENCES locations(id) ON DELETE CASCADE,
+                assigned_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                weekdays TEXT NOT NULL,
+                due_time TEXT NOT NULL,
+                last_generated_on TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS tasks (
                 id TEXT PRIMARY KEY,
                 company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
@@ -244,7 +279,10 @@ def initialize_database():
                 completion_notes TEXT NOT NULL DEFAULT '',
                 photo_before TEXT,
                 photo_after TEXT,
-                completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
+                completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+                schedule_id TEXT REFERENCES task_schedules(id) ON DELETE SET NULL,
+                scheduled_for TEXT,
+                missed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS company_notifications (
                 id TEXT PRIMARY KEY,
@@ -301,6 +339,11 @@ def initialize_database():
         add_column_if_missing(
             conn, "tasks", "completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
+        add_column_if_missing(
+            conn, "tasks", "schedule_id TEXT REFERENCES task_schedules(id) ON DELETE SET NULL"
+        )
+        add_column_if_missing(conn, "tasks", "scheduled_for TEXT")
+        add_column_if_missing(conn, "tasks", "missed_at TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_locations_company ON locations(company_id, name)"
         )
@@ -317,11 +360,78 @@ def initialize_database():
             "CREATE INDEX IF NOT EXISTS idx_tasks_assignee_deadline ON tasks(assigned_user_id, deadline)"
         )
         conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_schedule_occurrence ON tasks(schedule_id, scheduled_for)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(company_id, completed_at, missed_at)"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_notifications_company_date ON company_notifications(company_id, created_at DESC)"
         )
 
 
 initialize_database()
+
+
+def process_due_tasks(now: datetime | None = None):
+    current = now or datetime.now(timezone.utc)
+    local_today = current.astimezone(SCHEDULE_TIMEZONE).date()
+    generation_end = local_today + timedelta(days=6)
+    with connection() as conn:
+        schedules = conn.execute(
+            """SELECT s.*, l.name AS location_name
+                FROM task_schedules s
+                JOIN locations l ON l.id = s.location_id"""
+        ).fetchall()
+        for schedule in schedules:
+            weekdays = set(json.loads(schedule["weekdays"]))
+            start = date.fromisoformat(schedule["last_generated_on"]) + timedelta(days=1)
+            scheduled_time = time.fromisoformat(schedule["due_time"])
+            occurrence_day = start
+            while occurrence_day <= generation_end:
+                if occurrence_day.weekday() in weekdays:
+                    deadline_local = datetime.combine(
+                        occurrence_day, scheduled_time, tzinfo=SCHEDULE_TIMEZONE
+                    )
+                    deadline = deadline_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+                    conn.execute(
+                        """INSERT INTO tasks
+                            (id, company_id, assigned_user_id, title, description, deadline,
+                                created_at, schedule_id, scheduled_for, missed_at)
+                            VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                            ON CONFLICT(schedule_id, scheduled_for) DO NOTHING""",
+                        (
+                            str(uuid.uuid4()),
+                            schedule["company_id"],
+                            schedule["assigned_user_id"],
+                            schedule["location_name"],
+                            deadline,
+                            current.isoformat(timespec="seconds"),
+                            schedule["id"],
+                            occurrence_day.isoformat(),
+                            deadline if deadline_local <= current else None,
+                        ),
+                    )
+                occurrence_day += timedelta(days=1)
+            if start <= generation_end:
+                conn.execute(
+                    "UPDATE task_schedules SET last_generated_on = ? WHERE id = ?",
+                    (generation_end.isoformat(), schedule["id"]),
+                )
+        conn.execute(
+            """UPDATE tasks SET missed_at = deadline
+                WHERE completed_at IS NULL AND missed_at IS NULL AND deadline <= ?""",
+            (current.isoformat(timespec="seconds"),),
+        )
+
+
+async def task_schedule_worker():
+    while True:
+        try:
+            process_due_tasks()
+        except Exception:
+            logger.exception("Falha ao gerar ocorrências ou registrar tarefas vencidas.")
+        await asyncio.sleep(60)
 
 
 class CompanyRegistration(BaseModel):
@@ -404,14 +514,35 @@ class SectorInput(BaseModel):
 class LocationInput(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
     photo: str | None = None
+    sector: str = ""
     responsible: Annotated[str, Field(min_length=1, max_length=100)]
     responsible_user_id: str | None = None
     frequency: str
+    schedule_days: Annotated[list[int], Field(min_length=1, max_length=7)] = Field(
+        default_factory=lambda: list(range(6))
+    )
+    schedule_time: Annotated[str, Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")] = "23:59"
 
-    @field_validator("name", "responsible")
+    @field_validator("name", "sector", "responsible")
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("schedule_days")
+    @classmethod
+    def validate_schedule_days(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != len(value) or any(day < 0 or day > 6 for day in value):
+            raise ValueError("Selecione dias da semana válidos, sem repetições.")
+        return sorted(value)
+
+    @field_validator("schedule_time")
+    @classmethod
+    def validate_schedule_time(cls, value: str) -> str:
+        try:
+            time.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError("Informe um horário válido no formato 24 horas.") from error
+        return value
 
 
 class CleaningInput(BaseModel):
@@ -481,7 +612,10 @@ class TaskUpdateInput(BaseModel):
     def validate_deadline(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("O prazo precisa incluir o fuso horário.")
-        return value.astimezone(timezone.utc)
+        deadline = value.astimezone(timezone.utc)
+        if deadline <= datetime.now(timezone.utc):
+            raise ValueError("O prazo deve ser uma data e hora futuras.")
+        return deadline
 
 
 class TaskCompletionInput(BaseModel):
@@ -610,15 +744,84 @@ def company_row(conn: sqlite3.Connection, company_id: str):
 
 def fetch_location(conn: sqlite3.Connection, location_id: str, company_id: str):
     row = conn.execute(
-        """SELECT l.*, u.sector AS responsible_sector
+        """SELECT l.*, u.sector AS responsible_sector,
+                s.id AS schedule_id, s.weekdays AS schedule_days,
+                s.due_time AS schedule_time
             FROM locations l
             LEFT JOIN users u ON u.id = l.responsible_user_id
+            LEFT JOIN task_schedules s ON s.location_id = l.id
             WHERE l.id = ? AND l.company_id = ?""",
         (location_id, company_id),
     ).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail="Local não encontrado nesta empresa.")
     return dict(row)
+
+
+def save_location_schedule(
+    conn: sqlite3.Connection,
+    location_id: str,
+    company_id: str,
+    responsible_user_id: str,
+    location_name: str,
+    weekdays: list[int],
+    due_time: str,
+):
+    today = datetime.now(SCHEDULE_TIMEZONE).date()
+    existing = conn.execute(
+        "SELECT id FROM task_schedules WHERE location_id = ? AND company_id = ?",
+        (location_id, company_id),
+    ).fetchone()
+    if existing is not None:
+        current_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for task in conn.execute(
+            """SELECT id, scheduled_for, assigned_user_id
+                FROM tasks WHERE schedule_id = ? AND completed_at IS NULL
+                    AND missed_at IS NULL AND deadline > ?""",
+            (existing["id"], current_utc),
+        ).fetchall():
+            occurrence_day = date.fromisoformat(task["scheduled_for"])
+            if occurrence_day.weekday() not in weekdays:
+                conn.execute("DELETE FROM tasks WHERE id = ?", (task["id"],))
+                continue
+            deadline = datetime.combine(
+                occurrence_day, time.fromisoformat(due_time), tzinfo=SCHEDULE_TIMEZONE
+            ).astimezone(timezone.utc).isoformat(timespec="seconds")
+            changed_assignee = task["assigned_user_id"] != responsible_user_id
+            conn.execute(
+                """UPDATE tasks SET title = ?, assigned_user_id = ?, deadline = ?,
+                        acknowledged_at = CASE WHEN ? THEN NULL ELSE acknowledged_at END
+                    WHERE id = ?""",
+                (
+                    location_name,
+                    responsible_user_id,
+                    deadline,
+                    changed_assignee,
+                    task["id"],
+                ),
+            )
+    conn.execute(
+        """INSERT INTO task_schedules
+            (id, company_id, location_id, assigned_user_id, weekdays, due_time,
+                last_generated_on, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(location_id) DO UPDATE SET
+                company_id = excluded.company_id,
+                assigned_user_id = excluded.assigned_user_id,
+                weekdays = excluded.weekdays,
+                due_time = excluded.due_time,
+                last_generated_on = excluded.last_generated_on""",
+        (
+            str(uuid.uuid4()),
+            company_id,
+            location_id,
+            responsible_user_id,
+            json.dumps(weekdays),
+            due_time,
+            (today - timedelta(days=1)).isoformat(),
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
 
 
 def employee_location_filter(session: dict, alias: str = "l") -> tuple[str, list[str]]:
@@ -663,10 +866,11 @@ def responsible_user_for_location(
     company_id: str,
     responsible: str,
     responsible_user_id: str | None = None,
+    sector: str = "",
 ):
     if responsible_user_id:
         row = conn.execute(
-            "SELECT id, name FROM users WHERE id = ? AND company_id = ?",
+            "SELECT id, name, sector FROM users WHERE id = ? AND company_id = ?",
             (responsible_user_id, company_id),
         ).fetchone()
         if row is None:
@@ -674,9 +878,14 @@ def responsible_user_for_location(
                 status_code=422,
                 detail="O responsável selecionado não pertence a esta empresa.",
             )
+        if sector and row["sector"].strip().casefold() != sector.strip().casefold():
+            raise HTTPException(
+                status_code=422,
+                detail="O funcionário responsável deve pertencer ao setor selecionado.",
+            )
         return dict(row)
     rows = conn.execute(
-        """SELECT id, name FROM users
+        """SELECT id, name, sector FROM users
             WHERE company_id = ? AND lower(trim(name)) = lower(trim(?))""",
         (company_id, responsible),
     ).fetchall()
@@ -684,6 +893,11 @@ def responsible_user_for_location(
         raise HTTPException(
             status_code=422,
             detail="Selecione um funcionário cadastrado como responsável pelo local.",
+        )
+    if sector and rows[0]["sector"].strip().casefold() != sector.strip().casefold():
+        raise HTTPException(
+            status_code=422,
+            detail="O funcionário responsável deve pertencer ao setor selecionado.",
         )
     return dict(rows[0])
 
@@ -993,6 +1207,7 @@ def update_user(user_id: str, payload: UserUpdateInput, session: dict = Depends(
 
 @app.get("/api/tasks")
 def list_tasks(session: dict = Depends(current_session)):
+    process_due_tasks()
     clauses = ["t.company_id = ?"]
     params: list[str] = [session["company_id"]]
     if session["role"] == "user":
@@ -1011,7 +1226,7 @@ def list_tasks(session: dict = Depends(current_session)):
                 JOIN users u ON u.id = t.assigned_user_id
                 LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(clauses)}
-                ORDER BY CASE WHEN t.completed_at IS NULL THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN t.completed_at IS NULL AND t.missed_at IS NULL THEN 0 ELSE 1 END,
                     t.deadline ASC""",
             params,
         ).fetchall()
@@ -1058,6 +1273,7 @@ def update_task(
     payload: TaskUpdateInput,
     session: dict = Depends(company_only),
 ):
+    process_due_tasks()
     with connection() as conn:
         assignee = conn.execute(
             "SELECT id FROM users WHERE id = ? AND company_id = ?",
@@ -1066,7 +1282,7 @@ def update_task(
         if assignee is None:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado nesta empresa.")
         existing = conn.execute(
-            """SELECT assigned_user_id, title, description, deadline, completed_at
+            """SELECT assigned_user_id, title, description, deadline, completed_at, missed_at
                 FROM tasks WHERE id = ? AND company_id = ?""",
             (task_id, session["company_id"]),
         ).fetchone()
@@ -1074,6 +1290,8 @@ def update_task(
             raise HTTPException(status_code=404, detail="Demanda não encontrada.")
         if existing["completed_at"] is not None:
             raise HTTPException(status_code=409, detail="Demandas concluídas não podem ser editadas.")
+        if existing["missed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Tarefas vencidas não podem ser editadas.")
         deadline = payload.deadline.isoformat(timespec="seconds")
         changed = any(
             (
@@ -1112,10 +1330,11 @@ def update_task(
 def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
     if session["role"] != "user":
         raise HTTPException(status_code=403, detail="Somente funcionários podem dar ciência.")
+    process_due_tasks()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
         task = conn.execute(
-            """SELECT t.acknowledged_at, t.completed_at, assigned.sector AS assignee_sector,
+            """SELECT t.acknowledged_at, t.completed_at, t.missed_at, assigned.sector AS assignee_sector,
                     active_user.sector AS current_sector
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
@@ -1134,13 +1353,16 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
             raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
         if task["completed_at"] is not None:
             raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+        if task["missed_at"] is not None:
+            raise HTTPException(status_code=409, detail="O prazo desta tarefa venceu; ela está no histórico.")
         if task["acknowledged_at"] is not None:
             return {"id": task_id, "acknowledged_at": task["acknowledged_at"]}
         cursor = conn.execute(
             """UPDATE tasks SET acknowledged_at = ?
                 WHERE id = ? AND company_id = ?
-                    AND acknowledged_at IS NULL AND completed_at IS NULL""",
-            (now, task_id, session["company_id"]),
+                    AND acknowledged_at IS NULL AND completed_at IS NULL
+                    AND missed_at IS NULL AND deadline > ?""",
+            (now, task_id, session["company_id"], now),
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=409, detail="Esta tarefa foi atualizada por outra pessoa.")
@@ -1161,6 +1383,7 @@ def complete_task(
 ):
     if session["role"] != "user":
         raise HTTPException(status_code=403, detail="Somente um funcionário do setor responsável pode concluir a tarefa.")
+    process_due_tasks()
     photo_filenames = []
     for photo in (payload.photo_before, payload.photo_after):
         match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:jpg|png|webp))", photo)
@@ -1170,7 +1393,7 @@ def complete_task(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
         task = conn.execute(
-            """SELECT t.assigned_user_id, t.acknowledged_at, t.completed_at,
+            """SELECT t.assigned_user_id, t.acknowledged_at, t.completed_at, t.missed_at, t.deadline,
                     assigned.sector AS assignee_sector,
                     active_user.sector AS current_sector
                 FROM tasks t
@@ -1190,6 +1413,8 @@ def complete_task(
             raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
         if task["completed_at"] is not None:
             raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+        if task["missed_at"] is not None or task["deadline"] <= now:
+            raise HTTPException(status_code=409, detail="O prazo desta tarefa venceu; ela está no histórico.")
         if task["acknowledged_at"] is None:
             raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
         if task["assigned_user_id"] != session["account_id"] and not payload.notes:
@@ -1209,7 +1434,8 @@ def complete_task(
             """UPDATE tasks SET completed_at = ?, completion_notes = ?,
                     photo_before = ?, photo_after = ?, completed_by_user_id = ?
                 WHERE id = ? AND company_id = ?
-                    AND acknowledged_at IS NOT NULL AND completed_at IS NULL""",
+                    AND acknowledged_at IS NOT NULL AND completed_at IS NULL
+                    AND missed_at IS NULL AND deadline > ?""",
             (
                 now,
                 payload.notes,
@@ -1218,6 +1444,7 @@ def complete_task(
                 session["account_id"],
                 task_id,
                 session["company_id"],
+                now,
             ),
         )
         if cursor.rowcount == 0:
@@ -1422,6 +1649,8 @@ def list_locations(
         rows = conn.execute(
             f"""
             SELECT l.*, owner.sector AS responsible_sector,
+                schedule.id AS schedule_id, schedule.weekdays AS schedule_days,
+                schedule.due_time AS schedule_time,
                 (SELECT COUNT(*) FROM cleanings c WHERE c.location_id = l.id) AS cleaning_count,
                 (SELECT c.cleaning_date FROM cleanings c WHERE c.location_id = l.id
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_cleaned,
@@ -1429,6 +1658,7 @@ def list_locations(
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_status
             FROM locations l
             LEFT JOIN users owner ON owner.id = l.responsible_user_id
+            LEFT JOIN task_schedules schedule ON schedule.location_id = l.id
             WHERE {' AND '.join(clauses)}
             ORDER BY l.name COLLATE NOCASE
             """,
@@ -1447,6 +1677,7 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
             session["company_id"],
             payload.responsible,
             payload.responsible_user_id,
+            payload.sector,
         )
         conn.execute(
             """INSERT INTO locations
@@ -1462,6 +1693,15 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
                 payload.frequency,
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
+        )
+        save_location_schedule(
+            conn,
+            location_id,
+            session["company_id"],
+            responsible["id"],
+            payload.name,
+            payload.schedule_days,
+            payload.schedule_time,
         )
         return fetch_location(conn, location_id, session["company_id"])
 
@@ -1486,6 +1726,7 @@ def update_location(
             session["company_id"],
             payload.responsible,
             payload.responsible_user_id,
+            payload.sector,
         )
         conn.execute(
             """UPDATE locations SET name = ?, photo = ?, responsible = ?,
@@ -1500,6 +1741,15 @@ def update_location(
                 location_id,
                 session["company_id"],
             ),
+        )
+        save_location_schedule(
+            conn,
+            location_id,
+            session["company_id"],
+            responsible["id"],
+            payload.name,
+            payload.schedule_days,
+            payload.schedule_time,
         )
         return fetch_location(conn, location_id, session["company_id"])
 
@@ -1523,6 +1773,7 @@ def list_history(
     date_to: str = Query(default="", alias="to"),
     session: dict = Depends(current_session),
 ):
+    process_due_tasks()
     clauses = ["l.company_id = ?"]
     params: list[str] = [session["company_id"]]
     if session["role"] == "user":
@@ -1533,11 +1784,15 @@ def list_history(
         clauses.append("c.location_id = ?")
         params.append(location_id)
     if status:
-        if status not in STATUSES | {"Concluída"}:
+        if status not in STATUSES | {"Concluída", "Não feito"}:
             raise HTTPException(status_code=422, detail="Filtro de status inválido.")
-        if status != "Concluída":
+        if status in STATUSES:
             clauses.append("c.status = ?")
             params.append(status)
+        elif status == "Concluída":
+            clauses.append("c.status = 'Limpo'")
+        else:
+            clauses.append("0 = 1")
     if search.strip():
         clauses.append("(l.name LIKE ? OR l.responsible LIKE ? OR c.notes LIKE ? OR u.name LIKE ?)")
         params.extend([f"%{search.strip()}%"] * 4)
@@ -1553,19 +1808,23 @@ def list_history(
             SELECT c.*, l.name AS location_name, l.responsible,
                 owner.sector AS responsible_sector,
                 COALESCE(u.name, co.fantasy_name) AS created_by_name,
-                u.name AS executor_name
+                u.name AS executor_name,
+                c.created_at AS event_at,
+                'cleaning' AS record_type
             FROM cleanings c
             JOIN locations l ON l.id = c.location_id
             JOIN companies co ON co.id = l.company_id
             LEFT JOIN users owner ON owner.id = l.responsible_user_id
             LEFT JOIN users u ON u.id = c.created_by_user_id
             WHERE {' AND '.join(clauses)}
-                AND (? != 'Concluída')
             ORDER BY c.cleaning_date DESC, c.created_at DESC
             """,
-            [*params, status],
+            params,
         ).fetchall()
-        task_clauses = ["t.company_id = ?", "t.completed_at IS NOT NULL"]
+        task_clauses = [
+            "t.company_id = ?",
+            "(t.completed_at IS NOT NULL OR t.missed_at IS NOT NULL)",
+        ]
         task_params: list[str] = [session["company_id"]]
         if session["role"] == "user":
             task_clauses.append(
@@ -1575,41 +1834,64 @@ def list_history(
                 )))"""
             )
             task_params.extend([session["account_id"], session["company_id"]])
-        if status and status != "Concluída":
+        if status == "Concluída":
+            task_clauses.append("t.completed_at IS NOT NULL")
+        elif status == "Não feito":
+            task_clauses.append("t.missed_at IS NOT NULL")
+        elif status in STATUSES:
             task_clauses.append("0 = 1")
         if search.strip():
             task_clauses.append(
-                "(t.title LIKE ? OR t.description LIKE ? OR assigned.name LIKE ? OR executor.name LIKE ?)"
+                """(t.title LIKE ? OR t.description LIKE ? OR assigned.name LIKE ?
+                    OR executor.name LIKE ? OR assigned.sector LIKE ?)"""
             )
-            task_params.extend([f"%{search.strip()}%"] * 4)
+            task_params.extend([f"%{search.strip()}%"] * 5)
         if date_from:
-            task_clauses.append("substr(t.completed_at, 1, 10) >= ?")
+            task_clauses.append("substr(COALESCE(t.completed_at, t.missed_at), 1, 10) >= ?")
             task_params.append(date_from)
         if date_to:
-            task_clauses.append("substr(t.completed_at, 1, 10) <= ?")
+            task_clauses.append("substr(COALESCE(t.completed_at, t.missed_at), 1, 10) <= ?")
             task_params.append(date_to)
         task_rows = conn.execute(
-            f"""SELECT 'task-' || t.id AS id, t.id AS task_id, 'task' AS record_type,
-                    substr(t.completed_at, 1, 10) AS cleaning_date,
+            f"""SELECT 'task-' || t.id AS id, t.id AS task_id,
+                    COALESCE(schedule.location_id, '') AS location_id, 'task' AS record_type,
+                    substr(COALESCE(t.completed_at, t.missed_at), 1, 10) AS cleaning_date,
                     t.completed_at AS completed_at,
-                    'Concluída' AS status, t.photo_before, t.photo_after,
-                    t.completion_notes AS notes, t.completed_at AS created_at,
+                    t.missed_at AS missed_at,
+                    CASE WHEN t.missed_at IS NOT NULL THEN 'Não feito' ELSE 'Concluída' END AS status,
+                    t.photo_before, t.photo_after,
+                    t.completion_notes AS notes, COALESCE(t.completed_at, t.missed_at) AS created_at,
+                    COALESCE(t.completed_at, t.missed_at) AS event_at,
                     t.title AS location_name, assigned.name AS responsible,
                     assigned.sector AS responsible_sector,
                     executor.name AS executor_name,
                     executor.name AS created_by_name
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
+                LEFT JOIN task_schedules schedule ON schedule.id = t.schedule_id
                 LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(task_clauses)}
-                ORDER BY t.completed_at DESC""",
+                ORDER BY COALESCE(t.completed_at, t.missed_at) DESC""",
             task_params,
         ).fetchall()
     return sorted(
         [dict(row) for row in (*rows, *task_rows)],
-        key=lambda row: (row["cleaning_date"] or "", row["created_at"] or ""),
+        key=lambda row: (row["event_at"] or "", row["created_at"] or ""),
         reverse=True,
     )
+
+
+@app.delete("/api/tasks/{task_id}/missed", status_code=204)
+def delete_missed_task(task_id: str, session: dict = Depends(company_only)):
+    with connection() as conn:
+        cursor = conn.execute(
+            """DELETE FROM tasks
+                WHERE id = ? AND company_id = ? AND missed_at IS NOT NULL
+                    AND completed_at IS NULL""",
+            (task_id, session["company_id"]),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Tarefa vencida não encontrada.")
 
 
 @app.post("/api/history", status_code=201)

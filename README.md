@@ -8,7 +8,9 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Cadastro de funcionários pela empresa, com setor, identificador e senha.
 - Cadastro e organização de setores por empresa; filtros de locais, tarefas e histórico são preenchidos pelos setores cadastrados e acompanham os novos setores. Funcionários e responsáveis de locais são vinculados a um setor. A empresa pode editar o nome/setor de funcionários e alterar os dados, o prazo e o responsável das demandas pendentes.
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
-- Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado.
+- Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado do setor selecionado.
+- Cada local pode ter uma rotina automática: escolha setor, área, responsável, dias da semana e horário limite. Uma tarefa é criada para cada ocorrência programada e fica disponível para o setor do responsável.
+- Tarefas que não forem concluídas até o prazo passam automaticamente ao histórico como “Não feito” e não podem ser editadas. Somente a empresa pode removê-las do histórico.
 - As tarefas atribuídas aparecem para todos os funcionários do setor responsável, e somente colegas do mesmo setor podem dar ciência ou executá-las. Se outra pessoa do setor executar a tarefa, deve informar o motivo; o histórico identifica separadamente o responsável original e o funcionário que executou.
 - No histórico, o funcionário que executou aparece em coluna própria entre o responsável e a data; o motivo informado por quem executou no lugar de outra pessoa fica nas observações do registro.
 - Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
@@ -16,6 +18,7 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. As conclusões aparecem no histórico.
 - Cada conta pode escolher tema claro, escuro, seguir o sistema ou personalizar a cor de destaque nas configurações do perfil.
 - Histórico de atividades com data, status, observações e fotos antes/depois. Os registros não possuem operação de edição.
+- O histórico permite filtrar tarefas concluídas e não realizadas e informa setor, responsável, executor e data/hora.
 - Fotos protegidas por sessão e escopo da empresa/conta.
 - Layout responsivo e instalação como aplicativo pelo navegador compatível.
 
@@ -81,6 +84,8 @@ O modo local e o instalador desktop continuam usando SQLite. Para usar a mesma c
 5. Gere o domínio público do serviço Routiner. Abra o endereço HTTPS em cada dispositivo e entre com o login/senha existentes no servidor. As contas, funcionários, tarefas, históricos e fotos são lidos e gravados pela API no banco/volume remoto; respostas da API e fotos não são armazenadas em cache. O navegador guarda somente um cookie de sessão seguro (não a senha) e a preferência visual da conta.
 
 O endpoint `/api/health` verifica se o banco está acessível e é usado pelo Railway para health checks. O cadastro feito depois da publicação já será criado no PostgreSQL remoto. Não coloque credenciais do PostgreSQL no frontend.
+
+As rotinas usam o fuso `America/Sao_Paulo` por padrão. Para outro fuso IANA, configure `ROUTINER_TIMEZONE` no serviço da API. O servidor gera as próximas ocorrências automaticamente e marca vencimentos; mantenha uma única instância da API ativa para evitar trabalho duplicado desnecessário.
 
 ### Levar os dados locais existentes para o Railway
 

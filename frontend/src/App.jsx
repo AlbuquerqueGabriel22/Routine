@@ -935,7 +935,7 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
         </div>
         {loading && !team.length ? <LoadingState /> : visibleTeam.length ? (
           <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
-            {visibleTeam.map((member) => <tr key={member.id}><td><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td>{member.sector}</td><td><code className="login-code">{member.login}</code></td><td>{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at && !task.missed_at).length} pendentes</td><td><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
+            {visibleTeam.map((member) => <tr key={member.id}><td data-label="Funcionário"><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td data-label="Setor">{member.sector}</td><td data-label="Login"><code className="login-code">{member.login}</code></td><td data-label="Demandas">{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at && !task.missed_at).length} pendentes</td><td data-label="Conta"><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
           </tbody></table></div>
         ) : team.length ? <EmptyState className="team-empty" icon={Filter} title="Nenhum funcionário neste filtro" description="Altere os filtros de setor ou de pendências para ver a equipe." /> : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e acompanhar as atividades do setor." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
       </section>
@@ -1440,14 +1440,14 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
           <div className="table-scroll"><table className="history-table">
             <thead><tr><th>ÁREA</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>SETOR</th><th>DATA E HORA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
-              <td><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
-              <td><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
-              <td>{entry.executor_name || (entry.status === "Não feito" ? "—" : entry.created_by_name) || "—"}</td>
-              <td>{entry.responsible_sector || "—"}</td>
-              <td>{formatDateTime(entry.event_at || entry.created_at)}</td>
-              <td><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
-              <td><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
-              <td><button className="icon-button table-open" onClick={(event) => { event.stopPropagation(); onView(entry); }} aria-label={`Abrir registro de ${entry.location_name}`}><ChevronRight size={17} /></button></td>
+              <td data-label="Área"><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
+              <td data-label="Responsável"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
+              <td data-label="Execução">{entry.executor_name || (entry.status === "Não feito" ? "—" : entry.created_by_name) || "—"}</td>
+              <td data-label="Setor">{entry.responsible_sector || "—"}</td>
+              <td data-label="Data e hora">{formatDateTime(entry.event_at || entry.created_at)}</td>
+              <td data-label="Status"><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
+              <td data-label="Evidências"><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
+              <td data-label="Abrir"><button className="icon-button table-open" onClick={(event) => { event.stopPropagation(); onView(entry); }} aria-label={`Abrir registro de ${entry.location_name}`}><ChevronRight size={17} /></button></td>
             </tr>)}</tbody>
           </table></div>
         ) : <EmptyState className="large-empty" icon={ClipboardCheck} title="Ainda não há registros" description={locations.length ? "Registre uma limpeza para começar a montar o histórico." : "Cadastre um local antes de registrar uma limpeza."} action={locations.length > 0 && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Registrar limpeza</button>} />}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Routiner</string>
+    <string name="title_activity_main">Routiner</string>
+    <string name="package_name">br.com.routiner.mobile</string>
+    <string name="custom_url_scheme">br.com.routiner.mobile</string>
+</resources>

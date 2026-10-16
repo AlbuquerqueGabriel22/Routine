@@ -1,0 +1,16 @@
+{
+  "appId": "br.com.routiner.mobile",
+  "appName": "Routiner",
+  "webDir": "frontend/dist",
+  "server": {
+    "url": "https://routine.taildc7b60.ts.net",
+    "cleartext": false,
+    "allowNavigation": [
+      "routine.taildc7b60.ts.net"
+    ]
+  },
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false
+  }
+}

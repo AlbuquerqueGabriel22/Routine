@@ -95,13 +95,20 @@ O projeto pode ficar no seu Debian como servidor central. O PostgreSQL guarda co
    ```
 
    Se o comando pedir autorização para Funnel/HTTPS, habilite-a no painel do Tailscale e execute-o novamente. Não configure encaminhamento de portas no roteador.
-5. Consulte `sudo tailscale funnel status` para ver o endereço HTTPS público. O instalador desktop usa o endereço padrão configurado em `desktop/main.cjs`; se o endereço do servidor mudar, atualize essa configuração e gere novos instaladores. No celular Android, abra o endereço HTTPS no Chrome e escolha **Instalar app** ou **Adicionar à tela inicial**. O app móvel atual é um PWA servido pelo Debian: ele já se conecta ao mesmo servidor e não exige Tailscale no telefone.
+5. Consulte `sudo tailscale funnel status` para ver o endereço HTTPS público. O desktop e o app Android usam a URL configurada para se conectar ao servidor. Se o endereço mudar, atualize `desktop/main.cjs` e `capacitor.config.json` e gere novos instaladores. O Debian precisa permanecer ligado e acessível pela internet.
 
 ### Instalar os apps nos clientes
 
 O instalador Windows gerado neste projeto usa `DEFAULT_SERVER_URL` em `desktop/main.cjs`, então abre automaticamente o servidor compartilhado. Os clientes não precisam instalar Tailscale nem criar arquivos de configuração. O modo de desenvolvimento (`npm run desktop:dev`) continua usando sua API SQLite local.
 
-No Android, a interface responsiva existente é um PWA: abra o endereço HTTPS do servidor no Chrome e escolha **Instalar app** ou **Adicionar à tela inicial**. O ícone abre o mesmo servidor; não é necessário digitar o endereço novamente. Este projeto ainda não gera APK Android para download. Os usuários precisam de uma conta criada no servidor para entrar; a instalação não cria contas automaticamente.
+O app Android nativo é um contêiner Capacitor que abre o Routiner hospedado no servidor, então usa os mesmos dados e precisa de internet. O endereço do servidor está incluído em `capacitor.config.json`. Para gerar o APK localmente, instale Android Studio com Android SDK e JDK 21 e execute:
+
+```powershell
+npm ci
+npm run android:apk
+```
+
+O APK de teste aparece em `android\app\build\outputs\apk\debug\app-debug.apk`. Para compilar pelo GitHub, envie as alterações para `main` e baixe o artefato **Routiner-Android-...** na execução do workflow **Build Routiner Android app** em Actions. Para publicar um APK na área **Releases**, envie uma tag como `android-v1.0.0`; o workflow compila e anexa o APK automaticamente. O workflow gera um APK assinado com a chave de depuração do Android, adequado para teste e instalação direta, mas não para publicação na Play Store. A chave de depuração de cada execução do GitHub pode variar; para instalar uma atualização futura sobre a mesma instalação, será necessário configurar uma chave de assinatura privada persistente. O Android pode pedir autorização para instalar apps dessa fonte. O usuário instala o APK, abre o Routiner e entra com uma conta existente no servidor; não precisa instalar Tailscale nem configurar a URL.
 
 ### Migrar a base local do Windows
 

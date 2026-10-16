@@ -9,9 +9,13 @@
     "build:api": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-api.ps1",
     "build:desktop": "npm run build:web && npm run build:api && electron-builder --win nsis",
     "desktop:dev": "electron .",
-    "desktop:win": "npm run build:desktop"
+    "desktop:win": "npm run build:desktop",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:apk": "npm run android:sync && cd android && gradlew.bat assembleDebug",
+    "android:open": "cap open android"
   },
   "devDependencies": {
+    "@capacitor/cli": "^7.6.9",
     "electron": "^44.7.0",
     "electron-builder": "^26.0.12"
   },
@@ -60,5 +64,9 @@
   "allowScripts": {
     "electron@44.7.0": true,
     "electron-winstaller@5.4.0": true
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.6.9",
+    "@capacitor/core": "^7.6.9"
   }
 }

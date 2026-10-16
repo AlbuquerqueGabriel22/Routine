@@ -1471,7 +1471,7 @@ def list_company_notifications(session: dict = Depends(company_only)):
                 JOIN users assigned ON assigned.id = t.assigned_user_id
                 LEFT JOIN users u ON u.id = n.actor_user_id
                 WHERE n.company_id = ?
-                ORDER BY n.created_at DESC, n.rowid DESC LIMIT 100""",
+                ORDER BY n.created_at DESC, n.id DESC LIMIT 100""",
             (session["company_id"],),
         ).fetchall()
     return [dict(row) for row in rows]

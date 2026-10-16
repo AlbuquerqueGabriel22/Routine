@@ -15,6 +15,7 @@ if (!gotLock) {
   let mainWindow;
   let quitting = false;
   let serverPort;
+  let appBaseUrl;
 
   app.on("second-instance", () => {
     if (!mainWindow) return;
@@ -47,6 +48,25 @@ if (!gotLock) {
     };
   }
 
+  function getConfiguredServerUrl() {
+    const configPath = path.join(app.getPath("userData"), "server-url.txt");
+    if (!fs.existsSync(configPath)) return null;
+
+    const value = fs.readFileSync(configPath, "utf8").trim();
+    if (!value) return null;
+
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new Error(`Endereço inválido em ${configPath}. Informe a URL HTTPS do servidor.`);
+    }
+    if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash) {
+      throw new Error(`Endereço inválido em ${configPath}. Informe somente a origem HTTPS, por exemplo https://routiner.exemplo.ts.net.`);
+    }
+    return url.origin;
+  }
+
   function startApi(port) {
     const { executable, staticDir } = getServerPaths();
     if (!fs.existsSync(executable)) {
@@ -71,6 +91,7 @@ if (!gotLock) {
         ROUTINER_STATIC_DIR: staticDir,
       },
     });
+    appBaseUrl = `http://127.0.0.1:${port}`;
 
     apiProcess.once("error", (error) => {
       if (!quitting) showStartupError(`O servidor local do Routiner não pôde iniciar.\n\n${error.message}`);
@@ -82,8 +103,8 @@ if (!gotLock) {
     });
   }
 
-  async function waitForApi(port) {
-    const healthUrl = `http://127.0.0.1:${port}/api/health`;
+  async function waitForApi(baseUrl) {
+    const healthUrl = `${baseUrl}/api/health`;
     const deadline = Date.now() + 60_000;
     let lastError;
     while (Date.now() < deadline) {
@@ -119,15 +140,28 @@ if (!gotLock) {
     });
     mainWindow.once("ready-to-show", () => mainWindow.show());
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-      if (url.startsWith(`http://127.0.0.1:${serverPort}/uploads/`)) {
-        return { action: "allow" };
+      try {
+        const target = new URL(url);
+        if (target.origin === new URL(appBaseUrl).origin && target.pathname.startsWith("/uploads/")) {
+          return { action: "allow" };
+        }
+      } catch {
+        return { action: "deny" };
       }
       return { action: "deny" };
     });
-    await mainWindow.loadURL(`http://127.0.0.1:${serverPort}/`);
+    await mainWindow.loadURL(`${appBaseUrl}/`);
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
+  }
+
+  function isAppOrigin(url) {
+    try {
+      return new URL(url).origin === new URL(appBaseUrl).origin;
+    } catch {
+      return false;
+    }
   }
 
   function showStartupError(message) {
@@ -140,19 +174,26 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     try {
-      serverPort = await findAvailablePort();
-      startApi(serverPort);
-      await waitForApi(serverPort);
+      appBaseUrl = getConfiguredServerUrl();
+      if (appBaseUrl) {
+        await waitForApi(appBaseUrl);
+      } else {
+        serverPort = await findAvailablePort();
+        startApi(serverPort);
+        await waitForApi(appBaseUrl);
+      }
       session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
-        const localOrigin = `http://127.0.0.1:${serverPort}`;
         const allowed = permission === "media"
           && details.mediaTypes?.includes("video")
-          && details.requestingUrl?.startsWith(`${localOrigin}/`);
+          && isAppOrigin(details.requestingUrl || "");
         callback(Boolean(allowed));
       });
       await createMainWindow();
     } catch (error) {
-      showStartupError(error.message);
+      const message = appBaseUrl
+        ? `Não foi possível conectar ao servidor compartilhado (${appBaseUrl}).\n\nVerifique se o Debian está ligado e se este dispositivo está conectado ao Tailscale.\n\n${error.message}`
+        : `O servidor local do Routiner não pôde iniciar.\n\n${error.message}`;
+      showStartupError(message);
     }
   });
 

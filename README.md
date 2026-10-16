@@ -73,9 +73,68 @@ npm run preview
 
 Abra o endereço local exibido pelo preview e use **Instalar app** quando oferecido pelo navegador, ou a opção de instalação do menu do navegador. HTTPS é necessário para instalação fora de `localhost`.
 
+## Hospedar no Debian e acessar pelo Tailscale
+
+O projeto pode ficar no seu Debian como servidor central. O PostgreSQL guarda contas e tarefas; um volume Docker preserva fotos e dados do banco após reinicializações. O Tailscale Serve fornece um endereço HTTPS privado, acessível somente por dispositivos conectados à sua rede Tailscale. Não é necessário abrir portas no roteador nem expor o app à internet pública.
+
+1. Instale Docker Engine com o plugin Docker Compose e Tailscale no Debian. Entre no Tailscale no Debian, no Windows e no celular usando a mesma conta. A primeira execução do Serve pode pedir para habilitar certificados HTTPS na configuração do tailnet.
+2. Copie o projeto para o Debian e entre na pasta do projeto. Crie `.env` a partir de `.env.debian.example` e substitua os dois valores de exemplo por segredos diferentes, cada um com pelo menos 32 caracteres. Para gerar segredos hexadecimais no Debian, execute `openssl rand -hex 32` duas vezes. Nunca compartilhe nem envie o `.env` ao Git.
+3. Inicie a aplicação:
+
+   ```sh
+   docker compose up -d --build
+   docker compose ps
+   ```
+
+   Aguarde o serviço `routiner` ficar saudável. Os dados do PostgreSQL e as fotos são persistidos nos volumes `postgres_data` e `routiner_data`. O banco e a aplicação só escutam na interface local do Debian.
+4. Publique o serviço apenas no tailnet e veja o endereço HTTPS gerado:
+
+   ```sh
+   sudo tailscale serve --bg 8000
+   tailscale serve status
+   ```
+
+   Se o comando pedir autorização para HTTPS, habilite-a no painel do Tailscale e execute-o novamente. Não use `tailscale funnel` nem encaminhamento de portas do roteador para este modo privado.
+5. Abra esse endereço HTTPS no Windows e no celular. No celular, use **Adicionar à tela inicial/Instalar app** no navegador para ter o Routiner como aplicativo. Mantenha o Tailscale conectado nos aparelhos para usar o sistema fora da rede local.
+
+### Conectar o instalador desktop ao servidor
+
+Por padrão, o instalador Windows continua iniciando uma base SQLite local. Para que ele use os mesmos dados do Debian, crie o arquivo `%APPDATA%\Routiner\server-url.txt` e coloque nele somente a origem HTTPS mostrada por `tailscale serve status`, por exemplo `https://debian.exemplo.ts.net`. No PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\Routiner" | Out-Null
+Set-Content -NoNewline -Encoding ascii "$env:APPDATA\Routiner\server-url.txt" "https://debian.exemplo.ts.net"
+```
+
+Substitua o exemplo pelo endereço real e reinicie o Routiner. Enquanto esse arquivo existir e contiver uma URL, o desktop conecta-se ao Debian e não inicia sua API local. Para voltar ao modo local, apague `server-url.txt`. A primeira vez que usar o servidor, entre com uma conta existente nele; o login do servidor não é copiado automaticamente para o desktop.
+
+### Migrar a base local do Windows
+
+Faça backup da base SQLite e das fotos antes de migrar. Feche o Routiner desktop para evitar alterações durante a cópia. No Windows, a base do instalador fica em `%APPDATA%\Routiner\data\routiner.db` e as fotos em `%APPDATA%\Routiner\data\uploads`. Se os dados estiverem na versão de desenvolvimento, use `backend\cleaning.db` e `backend\uploads` como origem.
+
+Faça a migração antes de cadastrar contas no servidor. Para manter o PostgreSQL privado, abra no Windows um túnel SSH para o Debian e deixe esse terminal aberto:
+
+```powershell
+ssh -N -L 5433:127.0.0.1:5432 usuario@debian-no-tailscale
+```
+
+Em outro PowerShell na pasta do projeto, configure os dados do túnel, do servidor e da base SQLite de origem e execute o importador:
+
+```powershell
+$env:DATABASE_URL = "postgresql://routiner:SENHA_DO_POSTGRES@127.0.0.1:5433/routiner"
+$env:ROUTINER_MIGRATION_API_URL = "https://debian.exemplo.ts.net"
+$env:CLEANING_DB_PATH = "$env:APPDATA\Routiner\data\routiner.db"
+$env:CLEANING_UPLOAD_DIR = "$env:APPDATA\Routiner\data\uploads"
+.\.venv\Scripts\python.exe backend\migrate_sqlite_to_postgres.py
+```
+
+Troque os exemplos pelo usuário SSH do Debian, senha definida no `.env` e URL real do Tailscale. Para a versão de desenvolvimento, aponte `CLEANING_DB_PATH` e `CLEANING_UPLOAD_DIR` para `backend\cleaning.db` e `backend\uploads`. O importador preserva contas e registros e envia as fotos usando a API autenticada; quando houver fotos, ele pedirá a senha da empresa correspondente. Confira o acesso pelo celular e pelo desktop antes de remover qualquer cópia local. O script não sobrescreve linhas conflitantes no destino.
+
+Faça backups periódicos dos volumes Docker. Para listar os nomes: `docker volume ls`; inclua o banco e as fotos no backup e teste a restauração.
+
 ## Publicar no Railway para acessar em outros dispositivos
 
-O modo local e o instalador desktop continuam usando SQLite. Para usar a mesma conta, equipe, tarefas, histórico e fotos em vários celulares/computadores, publique a aplicação web/API e conecte-a a um PostgreSQL persistente:
+O modo local do app e o modo local do instalador desktop usam SQLite. Para compartilhar os mesmos dados, publique a aplicação web/API e conecte-a a um PostgreSQL persistente:
 
 1. Envie este repositório para o GitHub e crie um projeto no Railway a partir dele. O `Dockerfile` compila a interface e executa a API, que também serve a interface no mesmo endereço.
 2. Adicione um serviço PostgreSQL ao projeto e configure a variável `DATABASE_URL` do serviço Routiner para referenciar a URL desse banco (no Railway, use a referência de variável do serviço PostgreSQL).

@@ -73,11 +73,11 @@ npm run preview
 
 Abra o endereço local exibido pelo preview e use **Instalar app** quando oferecido pelo navegador, ou a opção de instalação do menu do navegador. HTTPS é necessário para instalação fora de `localhost`.
 
-## Hospedar no Debian e acessar pelo Tailscale
+## Hospedar no Debian e acessar pela internet
 
-O projeto pode ficar no seu Debian como servidor central. O PostgreSQL guarda contas e tarefas; um volume Docker preserva fotos e dados do banco após reinicializações. O Tailscale Serve fornece um endereço HTTPS privado, acessível somente por dispositivos conectados à sua rede Tailscale. Não é necessário abrir portas no roteador nem expor o app à internet pública.
+O projeto pode ficar no seu Debian como servidor central. O PostgreSQL guarda contas e tarefas; um volume Docker preserva fotos e dados do banco após reinicializações. O Tailscale Funnel fornece um endereço HTTPS público sem abrir portas no roteador. Instale o Tailscale apenas no Debian; os clientes acessam pelo app sem instalar Tailscale. Como o endereço é público, compartilhe-o somente com os usuários previstos e use senhas fortes.
 
-1. Instale Docker Engine com o plugin Docker Compose e Tailscale no Debian. Entre no Tailscale no Debian, no Windows e no celular usando a mesma conta. A primeira execução do Serve pode pedir para habilitar certificados HTTPS na configuração do tailnet.
+1. Instale Docker Engine com o plugin Docker Compose e Tailscale no Debian. Entre no Tailscale no Debian. Habilite HTTPS e Funnel na configuração do tailnet quando solicitado.
 2. Copie o projeto para o Debian e entre na pasta do projeto. Crie `.env` a partir de `.env.debian.example` e substitua os dois valores de exemplo por segredos diferentes, cada um com pelo menos 32 caracteres. Para gerar segredos hexadecimais no Debian, execute `openssl rand -hex 32` duas vezes. Nunca compartilhe nem envie o `.env` ao Git.
 3. Inicie a aplicação:
 
@@ -87,26 +87,21 @@ O projeto pode ficar no seu Debian como servidor central. O PostgreSQL guarda co
    ```
 
    Aguarde o serviço `routiner` ficar saudável. Os dados do PostgreSQL e as fotos são persistidos nos volumes `postgres_data` e `routiner_data`. O banco e a aplicação só escutam na interface local do Debian.
-4. Publique o serviço apenas no tailnet e veja o endereço HTTPS gerado:
+4. Publique o serviço na internet e veja o endereço HTTPS gerado:
 
    ```sh
-   sudo tailscale serve --bg 8000
-   tailscale serve status
+   sudo tailscale funnel --bg 8000
+   sudo tailscale funnel status
    ```
 
-   Se o comando pedir autorização para HTTPS, habilite-a no painel do Tailscale e execute-o novamente. Não use `tailscale funnel` nem encaminhamento de portas do roteador para este modo privado.
-5. Abra esse endereço HTTPS no Windows e no celular. No celular, use **Adicionar à tela inicial/Instalar app** no navegador para ter o Routiner como aplicativo. Mantenha o Tailscale conectado nos aparelhos para usar o sistema fora da rede local.
+   Se o comando pedir autorização para Funnel/HTTPS, habilite-a no painel do Tailscale e execute-o novamente. Não configure encaminhamento de portas no roteador.
+5. Consulte `sudo tailscale funnel status` para ver o endereço HTTPS público. O instalador desktop usa o endereço padrão configurado em `desktop/main.cjs`; se o endereço do servidor mudar, atualize essa configuração e gere novos instaladores. No celular Android, abra o endereço HTTPS no Chrome e escolha **Instalar app** ou **Adicionar à tela inicial**. O app móvel atual é um PWA servido pelo Debian: ele já se conecta ao mesmo servidor e não exige Tailscale no telefone.
 
-### Conectar o instalador desktop ao servidor
+### Instalar os apps nos clientes
 
-Por padrão, o instalador Windows continua iniciando uma base SQLite local. Para que ele use os mesmos dados do Debian, crie o arquivo `%APPDATA%\Routiner\server-url.txt` e coloque nele somente a origem HTTPS mostrada por `tailscale serve status`, por exemplo `https://debian.exemplo.ts.net`. No PowerShell:
+O instalador Windows gerado neste projeto usa `DEFAULT_SERVER_URL` em `desktop/main.cjs`, então abre automaticamente o servidor compartilhado. Os clientes não precisam instalar Tailscale nem criar arquivos de configuração. O modo de desenvolvimento (`npm run desktop:dev`) continua usando sua API SQLite local.
 
-```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\Routiner" | Out-Null
-Set-Content -NoNewline -Encoding ascii "$env:APPDATA\Routiner\server-url.txt" "https://debian.exemplo.ts.net"
-```
-
-Substitua o exemplo pelo endereço real e reinicie o Routiner. Enquanto esse arquivo existir e contiver uma URL, o desktop conecta-se ao Debian e não inicia sua API local. Para voltar ao modo local, apague `server-url.txt`. A primeira vez que usar o servidor, entre com uma conta existente nele; o login do servidor não é copiado automaticamente para o desktop.
+No Android, a interface responsiva existente é um PWA: abra o endereço HTTPS do servidor no Chrome e escolha **Instalar app** ou **Adicionar à tela inicial**. O ícone abre o mesmo servidor; não é necessário digitar o endereço novamente. Este projeto ainda não gera APK Android para download. Os usuários precisam de uma conta criada no servidor para entrar; a instalação não cria contas automaticamente.
 
 ### Migrar a base local do Windows
 
@@ -128,7 +123,7 @@ $env:CLEANING_UPLOAD_DIR = "$env:APPDATA\Routiner\data\uploads"
 .\.venv\Scripts\python.exe backend\migrate_sqlite_to_postgres.py
 ```
 
-Troque os exemplos pelo usuário SSH do Debian, senha definida no `.env` e URL real do Tailscale. Para a versão de desenvolvimento, aponte `CLEANING_DB_PATH` e `CLEANING_UPLOAD_DIR` para `backend\cleaning.db` e `backend\uploads`. O importador preserva contas e registros e envia as fotos usando a API autenticada; quando houver fotos, ele pedirá a senha da empresa correspondente. Confira o acesso pelo celular e pelo desktop antes de remover qualquer cópia local. O script não sobrescreve linhas conflitantes no destino.
+Troque os exemplos pelo usuário SSH do Debian, senha definida no `.env` e URL HTTPS do Funnel. Para a versão de desenvolvimento, aponte `CLEANING_DB_PATH` e `CLEANING_UPLOAD_DIR` para `backend\cleaning.db` e `backend\uploads`. O importador preserva contas e registros e envia as fotos usando a API autenticada; quando houver fotos, ele pedirá a senha da empresa correspondente. Confira o acesso pelo celular e pelo desktop antes de remover qualquer cópia local. O script não sobrescreve linhas conflitantes no destino.
 
 Faça backups periódicos dos volumes Docker. Para listar os nomes: `docker volume ls`; inclua o banco e as fotos no backup e teste a restauração.
 
@@ -160,7 +155,7 @@ O importador solicita sem ecoar a senha de cada empresa que possui imagens, pres
 
 ## Gerar instalador para Windows
 
-O instalador desktop inclui o aplicativo e uma API Python empacotada; quem instala não precisa instalar Python ou Node.js. A API é iniciada ao abrir o Routiner, fica restrita ao próprio computador e é encerrada quando o aplicativo fecha.
+O instalador desktop inclui o aplicativo e uma API Python empacotada; quem instala não precisa instalar Python ou Node.js. O instalador de distribuição usa a URL HTTPS definida em `DEFAULT_SERVER_URL` e conecta ao servidor compartilhado. O modo de desenvolvimento continua local.
 
 Na máquina de desenvolvimento, com Node.js e Python instalados, execute na pasta do projeto:
 
@@ -171,7 +166,7 @@ npm install
 npm run desktop:win
 ```
 
-Se o comando `python` não estiver disponível, substitua-o pelo caminho completo do Python já indicado acima. O instalador final será criado em `release\Routiner-Setup-1.0.7.exe`. Ao iniciá-lo em um computador que já possui o Routiner, a pessoa pode atualizar/reparar para esta versão, desinstalar preservando os dados locais, ou cancelar. Para publicar o instalador atualizado, crie uma nova Release com a tag `v1.0.7` e anexe o arquivo gerado; a versão anterior continua disponível na [Release v1.0.6](https://github.com/AlbuquerqueGabriel22/Routine/releases/download/v1.0.6/Routiner-Setup-1.0.6.exe).
+Se o comando `python` não estiver disponível, substitua-o pelo caminho completo do Python já indicado acima. O instalador final será criado em `release\Routiner-Setup-2.12.0.exe`. Ao iniciá-lo em um computador que já possui o Routiner, a pessoa pode atualizar/reparar para esta versão, desinstalar preservando os dados locais, ou cancelar. Para distribuir, crie uma Release com a tag `v2.12.0` e anexe o arquivo gerado.
 
 O banco e as fotos ficam no perfil do usuário, fora da pasta de instalação: `%APPDATA%\Routiner\data\routiner.db` e `%APPDATA%\Routiner\data\uploads`. Esses dados permanecem após fechar ou atualizar o app; desinstalar o aplicativo não é necessário para iniciar a API ou criar o banco. Faça cópia de segurança dessa pasta regularmente. A base antiga da versão de desenvolvimento não é incluída no instalador; contas e dados preexistentes precisam de migração separada.
 

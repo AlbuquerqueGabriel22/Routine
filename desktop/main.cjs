@@ -4,6 +4,8 @@ const net = require("node:net");
 const path = require("node:path");
 const fs = require("node:fs");
 
+const DEFAULT_SERVER_URL = "https://routine.taildc7b60.ts.net";
+
 app.setName("Routiner");
 if (process.platform === "win32") app.setAppUserModelId("br.com.routiner.desktop");
 
@@ -49,15 +51,17 @@ if (!gotLock) {
   }
 
   function getConfiguredServerUrl() {
-    const configPath = path.join(app.getPath("userData"), "server-url.txt");
-    if (!fs.existsSync(configPath)) return null;
+    if (app.isPackaged) return DEFAULT_SERVER_URL;
 
-    const value = fs.readFileSync(configPath, "utf8").trim();
-    if (!value) return null;
+    const configPath = path.join(app.getPath("userData"), "server-url.txt");
+    const configuredValue = fs.existsSync(configPath)
+      ? fs.readFileSync(configPath, "utf8").trim()
+      : "";
+    if (!configuredValue) return null;
 
     let url;
     try {
-      url = new URL(value);
+      url = new URL(configuredValue);
     } catch {
       throw new Error(`Endereço inválido em ${configPath}. Informe a URL HTTPS do servidor.`);
     }
@@ -191,7 +195,7 @@ if (!gotLock) {
       await createMainWindow();
     } catch (error) {
       const message = appBaseUrl
-        ? `Não foi possível conectar ao servidor compartilhado (${appBaseUrl}).\n\nVerifique se o Debian está ligado e se este dispositivo está conectado ao Tailscale.\n\n${error.message}`
+        ? `Não foi possível conectar ao servidor compartilhado (${appBaseUrl}).\n\nVerifique se o servidor Debian está ligado e conectado à internet.\n\n${error.message}`
         : `O servidor local do Routiner não pôde iniciar.\n\n${error.message}`;
       showStartupError(message);
     }

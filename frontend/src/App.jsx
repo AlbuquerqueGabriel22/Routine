@@ -24,10 +24,8 @@ import {
   ListChecks,
   LogOut,
   Menu,
-  Monitor,
   Moon,
   MoreHorizontal,
-  Palette,
   Pencil,
   Plus,
   ShieldCheck,
@@ -151,7 +149,7 @@ function initials(name = "") {
 }
 
 function defaultAppearance() {
-  return { theme: "system", accent: "#2563eb" };
+  return { theme: "light" };
 }
 
 function appearanceStorageKey(account) {
@@ -222,11 +220,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [appearance, setAppearance] = useState(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(appearanceStorageKey(account)) || "{}");
-      return {
-        ...defaultAppearance(),
-        ...saved,
-        accent: saved.accent === "#557c68" ? "#2563eb" : saved.accent || defaultAppearance().accent,
-      };
+      return { theme: saved.theme === "dark" ? "dark" : "light" };
     } catch {
       return defaultAppearance();
     }
@@ -264,7 +258,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = appearance.theme;
-    root.style.setProperty("--custom-accent", appearance.accent);
     try {
       localStorage.setItem(appearanceStorageKey(account), JSON.stringify(appearance));
     } catch (error) {
@@ -772,10 +765,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onDelete={async (reason) => {
             setSaving(true);
             try {
-              const deletionPath = modal.item.missed_at
-                ? `/tasks/${modal.item.id}/missed`
-                : `/tasks/${modal.item.id}`;
-              await api(deletionPath, {
+              await api(`/tasks/${modal.item.id}`, {
                 method: "DELETE",
                 body: JSON.stringify({ reason }),
               });
@@ -881,24 +871,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "record" && (
         <RecordDialog
           item={modal.item}
-          isBoss={isBoss}
           onClose={() => setModal(null)}
-          onDelete={() => {
-            if (modal.item.record_type === "task") {
-              setModal({
-                type: "task-delete",
-                item: {
-                  id: modal.item.task_id,
-                  title: modal.item.location_name,
-                  deadline: modal.item.deadline,
-                  missed_at: modal.item.missed_at,
-                  assignee_name: modal.item.responsible,
-                },
-              });
-              return;
-            }
-            removeItem("history", modal.item.id);
-          }}
+          onDelete={() => removeItem("history", modal.item.id)}
         />
       )}
       {modal?.type === "location-detail" && (
@@ -1276,15 +1250,12 @@ function TaskDeletionHistory({ onClose }) {
 }
 
 function AppearanceSettings({ appearance, onChange, onClose }) {
-  return <Modal title="Configurações de aparência" subtitle="PERSONALIZE SEU ESPAÇO" onClose={onClose}>
+  return <Modal title="Aparência" subtitle="ESCOLHA UM TEMA" onClose={onClose}>
     <div className="appearance-settings">
-      <p>Escolha como o Routiner deve aparecer neste dispositivo.</p>
       <div className="appearance-options" role="radiogroup" aria-label="Tema">
         {[
           { value: "light", label: "Claro", icon: Sun },
           { value: "dark", label: "Escuro", icon: Moon },
-          { value: "system", label: "Sistema", icon: Monitor },
-          { value: "custom", label: "Personalizado", icon: Palette },
         ].map(({ value, label, icon: Icon }) => (
           <button
             type="button"
@@ -1298,12 +1269,6 @@ function AppearanceSettings({ appearance, onChange, onClose }) {
           </button>
         ))}
       </div>
-      {appearance.theme === "custom" && (
-        <label className="accent-picker">
-          <span>Cor de destaque</span>
-          <input type="color" value={appearance.accent} onChange={(event) => onChange((current) => ({ ...current, accent: event.target.value }))} />
-        </label>
-      )}
       <footer className="modal-footer"><span className="footer-spacer" /><button className="button-primary" onClick={onClose}>Concluir</button></footer>
     </div>
   </Modal>;
@@ -2096,7 +2061,7 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   </Modal>;
 }
 
-function RecordDialog({ item, isBoss, onClose, onDelete }) {
+function RecordDialog({ item, onClose, onDelete }) {
   const isMissedTask = item.record_type === "task" && item.status === "Não feito";
   const activityDate = item.record_type === "task"
     ? item.completed_at || item.missed_at
@@ -2111,7 +2076,7 @@ function RecordDialog({ item, isBoss, onClose, onDelete }) {
         <PhotoView label="Foto antes" photo={item.photo_before} />
         <PhotoView label="Foto depois" photo={item.photo_after} />
       </div>
-      <footer className="modal-footer">{(item.record_type !== "task" || (isBoss && isMissedTask)) && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> {isMissedTask ? "Remover do histórico" : "Excluir registro"}</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
+      <footer className="modal-footer">{item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
 }

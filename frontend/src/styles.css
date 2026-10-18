@@ -480,13 +480,10 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .completed-tasks { margin-top: 28px; }
 
 .appearance-settings { display: grid; gap: 15px; padding: 19px 23px 22px; }
-.appearance-settings > p { margin: 0; color: #7f8d84; font-size: 11px; }
 .appearance-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .appearance-option { display: flex; min-height: 55px; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid #e7ece8; border-radius: 10px; background: #fff; color: #738078; cursor: pointer; font-size: 11px; text-align: left; }
 .appearance-option > svg:last-child { margin-left: auto; color: var(--green); }
 .appearance-option.selected { border-color: var(--green); background: #f2f7f3; color: #456b56; }
-.accent-picker { display: flex; align-items: center; justify-content: space-between; color: #617067; font-size: 11px; }
-.accent-picker input { width: 43px; height: 32px; padding: 2px; border: 1px solid #e1e8e2; border-radius: 6px; background: #fff; cursor: pointer; }
 .task-execution-form { gap: 14px; }
 .task-execution-summary { display: grid; gap: 6px; padding: 12px 14px; border: 1px solid #e8ede9; border-radius: 10px; background: #f8faf8; }
 .task-execution-summary strong { color: #405248; font-size: 12px; }
@@ -559,7 +556,6 @@ html[data-theme="dark"] .filter-control select { border-color: var(--line); back
 html[data-theme="dark"] .task-meta,
 html[data-theme="dark"] .page-heading p,
 html[data-theme="dark"] .profile-menu-heading span,
-html[data-theme="dark"] .appearance-settings > p { color: #a0ada4; }
 html[data-theme="dark"] .history-table tbody tr:hover,
 html[data-theme="dark"] .notification-item.read { background: #273244; }
 html[data-theme="dark"] .task-reminder { border-color: #554a32; background: #322c21; color: #e0c587; }
@@ -592,75 +588,6 @@ html[data-theme="dark"] .schedule-days label.selected { border-color: var(--gree
 html[data-theme="dark"] .modal-form input,
 html[data-theme="dark"] .modal-form select,
 html[data-theme="dark"] .modal-form textarea { color-scheme: dark; }
-@media (prefers-color-scheme: dark) {
-  html[data-theme="system"] { color-scheme: dark; --app-bg: #111827; --panel: #1f2937; --line: #374151; --ink: #f3f4f6; --muted: #9ca3af; }
-  html[data-theme="system"] body { color: var(--ink); background: var(--app-bg); }
-  html[data-theme="system"] .sidebar,
-  html[data-theme="system"] .panel,
-  html[data-theme="system"] .modal,
-  html[data-theme="system"] .profile-menu,
-  html[data-theme="system"] .notification-popover,
-  html[data-theme="system"] .global-search,
-  html[data-theme="system"] .topbar,
-  html[data-theme="system"] .appearance-option,
-  html[data-theme="system"] .button-secondary { border-color: var(--line); background-color: var(--panel); color: var(--ink); }
-  html[data-theme="system"] .topbar { background: #1f2937ed; }
-  html[data-theme="system"] .brand strong,
-  html[data-theme="system"] .page-heading h1,
-  html[data-theme="system"] .breadcrumb.current,
-  html[data-theme="system"] .modal-header h2,
-  html[data-theme="system"] .section-head h2,
-  html[data-theme="system"] .task-title-row h3,
-  html[data-theme="system"] .profile-copy strong,
-  html[data-theme="system"] .profile-menu-heading strong { color: #e1e9e3; }
-  html[data-theme="system"] .nav-link:hover,
-  html[data-theme="system"] .profile-menu > button:hover { background: #374151; color: #dbeafe; }
-  html[data-theme="system"] .nav-link.active,
-  html[data-theme="system"] .appearance-option.selected,
-  html[data-theme="system"] .task-execution-summary { border-color: #3b82f6; background: #26364f; color: #dbeafe; }
-  html[data-theme="system"] .side-note,
-  html[data-theme="system"] .camera-open { border-color: var(--line); background: #273244; }
-  html[data-theme="system"] .profile-menu-heading,
-  html[data-theme="system"] .notification-heading,
-  html[data-theme="system"] .profile,
-  html[data-theme="system"] .modal-header { border-color: var(--line); }
-  html[data-theme="system"] input,
-  html[data-theme="system"] select,
-  html[data-theme="system"] textarea { color: var(--ink); }
-  html[data-theme="system"] .modal-form input,
-  html[data-theme="system"] .modal-form select,
-  html[data-theme="system"] .modal-form textarea,
-  html[data-theme="system"] .filter-control select { border-color: var(--line); background-color: #273244; }
-  html[data-theme="system"] .history-table tbody tr:hover,
-  html[data-theme="system"] .notification-item.read { background: #273244; }
-  html[data-theme="system"] .status-done { background: #293b30; color: #a8cfaf; }
-  html[data-theme="system"] .status-attention { background: #3b3325; color: #dec48d; }
-  html[data-theme="system"] .history-table th,
-  html[data-theme="system"] .history-table td,
-  html[data-theme="system"] .record-summary strong,
-  html[data-theme="system"] .record-date,
-  html[data-theme="system"] .record-notes,
-  html[data-theme="system"] .form-field label,
-  html[data-theme="system"] .schedule-days-field legend,
-  html[data-theme="system"] .table-location strong,
-  html[data-theme="system"] .table-person,
-  html[data-theme="system"] .activity-main strong,
-  html[data-theme="system"] .toolbar-copy,
-  html[data-theme="system"] .notification-copy strong,
-  html[data-theme="system"] .empty-state h3 { color: #dce5de; }
-  html[data-theme="system"] .task-execution-summary span,
-  html[data-theme="system"] .task-execution-summary small,
-  html[data-theme="system"] .field-hint,
-  html[data-theme="system"] .activity-main small,
-  html[data-theme="system"] .empty-state p,
-  html[data-theme="system"] .record-summary small { color: #a0ada4; }
-  html[data-theme="system"] .history-parties > small { color: #a0ada4; }
-  html[data-theme="system"] .schedule-days label { border-color: var(--line); background: #273244; color: #cbd5e1; }
-  html[data-theme="system"] .schedule-days label.selected { border-color: var(--green); background: #26364f; color: #dbeafe; }
-  html[data-theme="system"] .modal-form input,
-  html[data-theme="system"] .modal-form select,
-  html[data-theme="system"] .modal-form textarea { color-scheme: dark; }
-}
 .task-reminder { display: flex; align-items: center; gap: 8px; margin: 0 0 15px; padding: 11px 13px; border: 1px solid #f0dfc9; border-radius: 9px; background: #fcf7ef; color: #9b7540; font-size: 10px; }
 .acknowledgment-backdrop { z-index: 100; cursor: not-allowed; }
 .acknowledgment-modal { width: min(100%, 480px); padding: 28px; cursor: default; }

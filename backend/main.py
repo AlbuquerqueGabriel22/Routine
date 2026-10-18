@@ -1747,6 +1747,8 @@ def delete_task(
             raise HTTPException(status_code=409, detail="Esta tarefa já foi excluída.")
         if task["completed_at"] is not None:
             raise HTTPException(status_code=409, detail="Tarefas concluídas não podem ser excluídas.")
+        if task["missed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Tarefas vencidas no histórico não podem ser excluídas.")
         cursor = conn.execute(
             """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?
                 WHERE id = ? AND company_id = ? AND deleted_at IS NULL
@@ -2369,24 +2371,21 @@ def list_history(
 @app.delete("/api/tasks/{task_id}/missed", status_code=204)
 def delete_missed_task(
     task_id: str,
-    payload: TaskDeletionInput,
     session: dict = Depends(company_only),
 ):
     with connection() as conn:
-        cursor = conn.execute(
-            """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?
-                WHERE id = ? AND company_id = ? AND missed_at IS NOT NULL
-                    AND completed_at IS NULL AND deleted_at IS NULL""",
-            (
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                payload.reason,
-                session["account_id"],
-                task_id,
-                session["company_id"],
-            ),
-        )
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=409, detail="A tarefa vencida não pode mais ser excluída.")
+        task = conn.execute(
+            "SELECT missed_at, completed_at FROM tasks WHERE id = ? AND company_id = ?",
+            (task_id, session["company_id"]),
+        ).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Tarefa vencida não encontrada.")
+        if task["missed_at"] is None or task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa não é um registro vencido.")
+    raise HTTPException(
+        status_code=409,
+        detail="Tarefas vencidas no histórico não podem ser excluídas.",
+    )
 
 
 @app.post("/api/history", status_code=201)

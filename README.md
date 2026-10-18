@@ -13,15 +13,15 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
 - Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado do setor selecionado.
 - Cada item de limpeza pode ter uma rotina automática: escolha setor, tipo de limpeza, item, responsável, dias da semana e horário limite. Uma tarefa é criada para cada ocorrência programada e fica disponível para o setor do responsável; na aba **Tarefas** aparecem somente as ocorrências previstas para o dia atual.
-- Tarefas que não forem concluídas até o prazo passam automaticamente ao histórico como “Não feito” e não podem ser editadas. A exclusão administrativa exige um motivo e mantém o registro no arquivo de exclusões.
+- Uma tarefa só fica “Feito” após o envio das fotos de antes e depois. Se as duas fotos não forem enviadas até o prazo, ela passa automaticamente ao histórico como “Não feito”; depois disso, o registro não pode ser alterado, excluído ou editado, apenas consultado em detalhes.
 - Quando uma tarefa vence, o funcionário responsável recebe uma janela obrigatória com a tarefa, setor, prazo e descrição. Para fechá-la, precisa registrar uma observação confirmando a ciência; a resposta e o horário ficam no histórico.
 - As tarefas atribuídas aparecem para todos os funcionários do setor responsável, e somente colegas do mesmo setor podem dar ciência ou executá-las. Se outra pessoa do setor executar a tarefa, deve informar o motivo; o histórico identifica separadamente o responsável original e o funcionário que executou.
 - No histórico, o funcionário que executou aparece em coluna própria entre o responsável e a data; o motivo informado por quem executou no lugar de outra pessoa fica nas observações do registro.
 - Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
-- Somente a empresa pode excluir tarefas pendentes ou vencidas; a exclusão exige um motivo e fica disponível no histórico administrativo de exclusões.
+- Somente a empresa pode excluir tarefas pendentes; a exclusão exige um motivo e fica disponível no histórico administrativo de exclusões. Tarefas finalizadas, sejam “Feito” ou “Não feito”, não podem ser alteradas nem excluídas.
 - Alertas visuais de prazo ficam mais urgentes conforme a data se aproxima. A empresa recebe no sino os registros de ciência e conclusão, com funcionário, setor, tarefa e prazo.
-- O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. As conclusões aparecem no histórico.
-- Cada conta pode escolher tema claro, escuro, seguir o sistema ou personalizar a cor de destaque nas configurações do perfil.
+- O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. Só após o envio das duas fotos a tarefa passa para “Feito” e aparece como concluída no histórico.
+- Cada conta pode escolher entre os temas claro e escuro nas configurações do perfil.
 - Histórico de atividades com data, status, observações e fotos antes/depois. Os registros não possuem operação de edição.
 - O histórico permite filtrar tarefas concluídas e não realizadas e informa setor, responsável, executor e data/hora.
 - Fotos protegidas por sessão e escopo da empresa/conta.

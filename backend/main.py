@@ -9,12 +9,17 @@ import logging
 import os
 import re
 import secrets
+import smtplib
 import sqlite3
+import ssl
 import uuid
 from contextlib import asynccontextmanager, contextmanager
 from datetime import date, datetime, time, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
@@ -38,6 +43,7 @@ SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("ROUTINER_TIMEZONE", "America/Sao_Pa
 PASSWORD_ITERATIONS = 600_000
 SESSION_COOKIE = "routiner_session"
 SESSION_SECONDS = 60 * 60 * 12
+PASSWORD_RESET_SECONDS = 30 * 60
 HANDLE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,39}$")
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,29}$")
 
@@ -220,7 +226,9 @@ def initialize_database():
                 name TEXT NOT NULL,
                 sector TEXT NOT NULL,
                 username TEXT NOT NULL COLLATE NOCASE,
+                email TEXT,
                 password_hash TEXT NOT NULL,
+                initial_password_pending INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 UNIQUE(company_id, username)
             );
@@ -293,7 +301,20 @@ def initialize_database():
                 created_at TEXT NOT NULL,
                 read_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                id TEXT PRIMARY KEY,
+                company_id TEXT NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT
+            );
             """
+        )
+        add_column_if_missing(conn, "users", "email TEXT")
+        add_column_if_missing(
+            conn, "users", "initial_password_pending INTEGER NOT NULL DEFAULT 0"
         )
         # Existing prototype data stays unassigned and is never exposed to a new tenant.
         add_column_if_missing(
@@ -473,6 +494,7 @@ class UserInput(BaseModel):
     name: Annotated[str, Field(min_length=2, max_length=120)]
     sector: Annotated[str, Field(min_length=2, max_length=80)]
     username: Annotated[str, Field(min_length=2, max_length=40)]
+    email: Annotated[str, Field(min_length=5, max_length=254)]
     password: Annotated[str, Field(min_length=8, max_length=128)]
 
     @field_validator("name", "sector")
@@ -488,15 +510,60 @@ class UserInput(BaseModel):
             raise ValueError("Use de 2 a 30 letras minúsculas, números ou hífens.")
         return username
 
+    @field_validator("email")
+    @classmethod
+    def clean_email(cls, value: str) -> str:
+        email = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("Informe um e-mail válido.")
+        return email
+
 
 class UserUpdateInput(BaseModel):
     name: Annotated[str, Field(min_length=2, max_length=120)]
     sector: Annotated[str, Field(min_length=2, max_length=80)]
+    email: Annotated[str, Field(min_length=5, max_length=254)]
 
     @field_validator("name", "sector")
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def clean_email(cls, value: str) -> str:
+        email = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            raise ValueError("Informe um e-mail válido.")
+        return email
+
+
+class PasswordResetRequest(BaseModel):
+    role: Literal["company", "user"]
+    identifier: Annotated[str, Field(min_length=3, max_length=150)]
+    email: Annotated[str, Field(min_length=5, max_length=254)]
+
+    @field_validator("identifier", "email")
+    @classmethod
+    def clean_value(cls, value: str) -> str:
+        return value.strip().lower()
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Informe um e-mail válido.")
+        return value
+
+
+class PasswordResetConfirm(BaseModel):
+    token: Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{43}$")]
+    password: Annotated[str, Field(min_length=8, max_length=128)]
+
+
+class InitialPasswordChange(BaseModel):
+    current_password: Annotated[str, Field(min_length=1, max_length=128)]
+    new_password: Annotated[str, Field(min_length=8, max_length=128)]
 
 
 class SectorInput(BaseModel):
@@ -655,6 +722,78 @@ def verify_password(password: str, encoded: str) -> bool:
         return hmac.compare_digest(actual, expected)
     except (ValueError, TypeError):
         return False
+
+
+def password_reset_mail_settings() -> dict:
+    host = os.environ.get("SMTP_HOST", "").strip()
+    sender = os.environ.get("SMTP_FROM", "").strip()
+    if not host or not sender:
+        raise HTTPException(
+            status_code=503,
+            detail="A recuperação por e-mail ainda não está configurada no servidor.",
+        )
+    username = os.environ.get("SMTP_USERNAME", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "")
+    if bool(username) != bool(password):
+        raise HTTPException(
+            status_code=503,
+            detail="A configuração de e-mail do servidor está incompleta.",
+        )
+    try:
+        default_port = "465" if os.environ.get("SMTP_USE_SSL", "").lower() == "true" else "587"
+        port = int(os.environ.get("SMTP_PORT", default_port))
+    except ValueError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="A configuração de e-mail do servidor está inválida.",
+        ) from error
+    if not 1 <= port <= 65535:
+        raise HTTPException(
+            status_code=503,
+            detail="A porta SMTP precisa estar entre 1 e 65535.",
+        )
+    use_ssl = os.environ.get("SMTP_USE_SSL", "").lower() == "true"
+    use_starttls = os.environ.get("SMTP_STARTTLS", str(not use_ssl)).lower() == "true"
+    if use_ssl and use_starttls:
+        raise HTTPException(
+            status_code=503,
+            detail="Escolha SSL ou STARTTLS na configuração de e-mail do servidor.",
+        )
+    return {
+        "host": host,
+        "port": port,
+        "sender": sender,
+        "sender_name": os.environ.get("SMTP_FROM_NAME", "Routiner").strip() or "Routiner",
+        "username": username,
+        "password": password,
+        "use_ssl": use_ssl,
+        "use_starttls": use_starttls,
+    }
+
+
+def send_password_reset_email(
+    recipient: str,
+    account_name: str,
+    reset_url: str,
+    settings: dict,
+):
+    message = EmailMessage()
+    message["Subject"] = "Redefinição de senha do Routiner"
+    message["From"] = formataddr((settings["sender_name"], settings["sender"]))
+    message["To"] = recipient
+    message.set_content(
+        f"Olá, {account_name}.\n\n"
+        "Recebemos uma solicitação para redefinir a senha da sua conta Routiner.\n"
+        f"Acesse este link em até 30 minutos para escolher uma nova senha:\n{reset_url}\n\n"
+        "Se você não solicitou esta alteração, ignore este e-mail. Sua senha atual continuará válida."
+    )
+    client_type = smtplib.SMTP_SSL if settings["use_ssl"] else smtplib.SMTP
+    with client_type(settings["host"], settings["port"], timeout=10) as smtp:
+        if settings["use_starttls"]:
+            smtp.starttls(context=ssl.create_default_context())
+        if settings["username"]:
+            smtp.login(settings["username"], settings["password"])
+        smtp.send_message(message)
 
 
 def encode_session(payload: dict) -> str:
@@ -908,6 +1047,7 @@ def register_identifier(account: dict) -> dict:
     if account["role"] == "user":
         result["account_id"] = account["account_id"]
         result["sector"] = account["sector"]
+        result["initial_password_pending"] = account["initial_password_pending"]
     return result
 
 
@@ -1009,6 +1149,7 @@ def login_user(payload: LoginInput, request: Request, response: Response):
             "name": row["name"],
             "sector": row["sector"],
             "login": f'{row["username"]}.{row["company_handle"]}.routine',
+            "initial_password_pending": bool(row["initial_password_pending"]),
             "company": company,
         }
     set_session_cookie(response, request, account)
@@ -1030,7 +1171,8 @@ def get_current_account(session: dict = Depends(current_session)):
             }
         else:
             user = conn.execute(
-                "SELECT name, sector, username FROM users WHERE id = ? AND company_id = ?",
+                """SELECT name, sector, username, initial_password_pending
+                    FROM users WHERE id = ? AND company_id = ?""",
                 (session["account_id"], session["company_id"]),
             ).fetchone()
             if user is None:
@@ -1041,9 +1183,205 @@ def get_current_account(session: dict = Depends(current_session)):
                 "name": user["name"],
                 "sector": user["sector"],
                 "login": f'{user["username"]}.{company["company_handle"]}.routine',
+                "initial_password_pending": bool(user["initial_password_pending"]),
                 "company": company,
             }
     return result
+
+
+@app.post("/api/auth/initial-password/keep")
+def keep_initial_password(session: dict = Depends(current_session)):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Esta opção está disponível apenas para funcionários.")
+    with connection() as conn:
+        user = conn.execute(
+            """SELECT initial_password_pending FROM users
+                WHERE id = ? AND company_id = ?""",
+            (session["account_id"], session["company_id"]),
+        ).fetchone()
+        if user is None:
+            raise HTTPException(status_code=401, detail="Esta conta de funcionário não existe mais.")
+        if user["initial_password_pending"]:
+            conn.execute(
+                """UPDATE users SET initial_password_pending = 0
+                    WHERE id = ? AND company_id = ?""",
+                (session["account_id"], session["company_id"]),
+            )
+    return {"message": "Senha inicial mantida."}
+
+
+@app.post("/api/auth/initial-password/change")
+def change_initial_password(
+    payload: InitialPasswordChange,
+    session: dict = Depends(current_session),
+):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Esta opção está disponível apenas para funcionários.")
+    with connection() as conn:
+        user = conn.execute(
+            """SELECT password_hash, initial_password_pending FROM users
+                WHERE id = ? AND company_id = ?""",
+            (session["account_id"], session["company_id"]),
+        ).fetchone()
+        if user is None:
+            raise HTTPException(status_code=401, detail="Esta conta de funcionário não existe mais.")
+        if not user["initial_password_pending"]:
+            raise HTTPException(status_code=409, detail="A escolha da senha inicial já foi concluída.")
+        if not verify_password(payload.current_password, user["password_hash"]):
+            raise HTTPException(status_code=400, detail="A senha inicial informada está incorreta.")
+        conn.execute(
+            """UPDATE users SET password_hash = ?, initial_password_pending = 0
+                WHERE id = ? AND company_id = ?""",
+            (
+                hash_password(payload.new_password),
+                session["account_id"],
+                session["company_id"],
+            ),
+        )
+    return {"message": "Senha alterada com sucesso."}
+
+
+@app.post("/api/auth/password-reset/request", status_code=202)
+def request_password_reset(payload: PasswordResetRequest, request: Request):
+    mail_settings = password_reset_mail_settings()
+    account = None
+    with connection() as conn:
+        if payload.role == "company":
+            company_handle = payload.identifier.removesuffix(".routine")
+            if HANDLE_PATTERN.fullmatch(company_handle):
+                row = conn.execute(
+                    """SELECT id, fantasy_name AS name, email FROM companies
+                        WHERE company_handle = ? AND lower(email) = ?""",
+                    (company_handle, payload.email),
+                ).fetchone()
+                if row is not None:
+                    account = {**dict(row), "company_id": row["id"], "user_id": None}
+        elif payload.identifier.endswith(".routine"):
+            account_identifier = payload.identifier[:-8]
+            if "." in account_identifier:
+                username, company_handle = account_identifier.rsplit(".", 1)
+                if USERNAME_PATTERN.fullmatch(username) and HANDLE_PATTERN.fullmatch(company_handle):
+                    row = conn.execute(
+                        """SELECT u.id, u.company_id, u.name, u.email
+                            FROM users u JOIN companies c ON c.id = u.company_id
+                            WHERE u.username = ? AND c.company_handle = ?
+                                AND lower(u.email) = ?""",
+                        (username, company_handle, payload.email),
+                    ).fetchone()
+                    if row is not None:
+                        account = {**dict(row), "user_id": row["id"]}
+
+        if account is None:
+            return {"message": "Se os dados corresponderem a uma conta, enviaremos um link para o e-mail cadastrado."}
+
+        now = datetime.now(timezone.utc)
+        now_text = now.isoformat(timespec="seconds")
+        cooldown_text = (now - timedelta(seconds=60)).isoformat(timespec="seconds")
+        if account["user_id"] is None:
+            recent = conn.execute(
+                """SELECT 1 FROM password_reset_tokens
+                    WHERE company_id = ? AND user_id IS NULL AND created_at > ? LIMIT 1""",
+                (account["company_id"], cooldown_text),
+            ).fetchone()
+        else:
+            recent = conn.execute(
+                """SELECT 1 FROM password_reset_tokens
+                    WHERE user_id = ? AND created_at > ? LIMIT 1""",
+                (account["user_id"], cooldown_text),
+            ).fetchone()
+        if recent is not None:
+            return {"message": "Se os dados corresponderem a uma conta, enviaremos um link para o e-mail cadastrado."}
+
+        token = secrets.token_urlsafe(32)
+        token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+        expires_at = (now + timedelta(seconds=PASSWORD_RESET_SECONDS)).isoformat(timespec="seconds")
+        if account["user_id"] is None:
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE company_id = ? AND user_id IS NULL",
+                (account["company_id"],),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id = ?",
+                (account["user_id"],),
+            )
+        conn.execute(
+            """INSERT INTO password_reset_tokens
+                (id, company_id, user_id, token_hash, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid.uuid4()),
+                account["company_id"],
+                account["user_id"],
+                token_hash,
+                now_text,
+                expires_at,
+            ),
+        )
+
+    public_url = os.environ.get("ROUTINER_PUBLIC_URL", "").strip().rstrip("/")
+    if not public_url:
+        public_url = str(request.base_url).rstrip("/")
+    reset_url = f"{public_url}/?reset_token={quote(token)}"
+    try:
+        send_password_reset_email(account["email"], account["name"], reset_url, mail_settings)
+    except (smtplib.SMTPException, OSError) as error:
+        logger.exception("Falha ao enviar e-mail de redefinição de senha.")
+        with connection() as conn:
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE token_hash = ? AND used_at IS NULL",
+                (token_hash,),
+            )
+        raise HTTPException(
+            status_code=502,
+            detail="Não foi possível enviar o e-mail de recuperação. Tente novamente mais tarde.",
+        ) from error
+    return {"message": "Se os dados corresponderem a uma conta, enviaremos um link para o e-mail cadastrado."}
+
+
+@app.post("/api/auth/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirm):
+    token_hash = hashlib.sha256(payload.token.encode("ascii")).hexdigest()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        token = conn.execute(
+            """SELECT id, company_id, user_id FROM password_reset_tokens
+                WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?""",
+            (token_hash, now),
+        ).fetchone()
+        if token is None:
+            raise HTTPException(status_code=400, detail="Este link expirou ou já foi utilizado. Solicite outro.")
+        claimed = conn.execute(
+            """UPDATE password_reset_tokens SET used_at = ?
+                WHERE id = ? AND used_at IS NULL AND expires_at > ?""",
+            (now, token["id"], now),
+        )
+        if claimed.rowcount != 1:
+            raise HTTPException(status_code=400, detail="Este link expirou ou já foi utilizado. Solicite outro.")
+        password_hash = hash_password(payload.password)
+        if token["user_id"] is None:
+            conn.execute(
+                "UPDATE companies SET password_hash = ? WHERE id = ?",
+                (password_hash, token["company_id"]),
+            )
+            conn.execute(
+                """DELETE FROM password_reset_tokens
+                    WHERE company_id = ? AND user_id IS NULL AND id != ?""",
+                (token["company_id"], token["id"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE users SET password_hash = ? WHERE id = ? AND company_id = ?",
+                (password_hash, token["user_id"], token["company_id"]),
+            )
+            conn.execute(
+                "DELETE FROM password_reset_tokens WHERE user_id = ? AND id != ?",
+                (token["user_id"], token["id"]),
+            )
+    return {
+        "message": "Senha redefinida. Entre com sua nova senha.",
+        "role": "user" if token["user_id"] is not None else "company",
+    }
 
 
 @app.post("/api/auth/logout", status_code=204)
@@ -1056,7 +1394,7 @@ def list_users(session: dict = Depends(company_only)):
     with connection() as conn:
         company = company_row(conn, session["company_id"])
         rows = conn.execute(
-            """SELECT id, name, sector, username, created_at
+            """SELECT id, name, sector, username, email, created_at
                 FROM users WHERE company_id = ? ORDER BY name COLLATE NOCASE""",
             (session["company_id"],),
         ).fetchall()
@@ -1155,25 +1493,30 @@ def create_user(payload: UserInput, session: dict = Depends(company_only)):
         try:
             conn.execute(
                 """INSERT INTO users
-                    (id, company_id, name, sector, username, password_hash, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (id, company_id, name, sector, username, email, password_hash,
+                        initial_password_pending, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)""",
                 (
                     user_id,
                     session["company_id"],
                     payload.name,
                     sector_name,
                     payload.username,
+                    payload.email,
                     hash_password(payload.password),
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 ),
             )
         except sqlite3.IntegrityError as error:
+            if "email" in str(error).lower():
+                raise HTTPException(status_code=409, detail="Este e-mail já está cadastrado nesta empresa.") from error
             raise HTTPException(status_code=409, detail="Este identificador já está cadastrado nesta empresa.") from error
     return {
         "id": user_id,
         "name": payload.name,
         "sector": sector_name,
         "username": payload.username,
+        "email": payload.email,
         "login": f'{payload.username}.{company["company_handle"]}.routine',
     }
 
@@ -1183,14 +1526,14 @@ def update_user(user_id: str, payload: UserUpdateInput, session: dict = Depends(
     with connection() as conn:
         sector_name = require_company_sector(conn, session["company_id"], payload.sector)
         cursor = conn.execute(
-            """UPDATE users SET name = ?, sector = ?
+            """UPDATE users SET name = ?, sector = ?, email = ?
                 WHERE id = ? AND company_id = ?""",
-            (payload.name, sector_name, user_id, session["company_id"]),
+            (payload.name, sector_name, payload.email, user_id, session["company_id"]),
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado.")
         row = conn.execute(
-            """SELECT u.id, u.name, u.sector, u.username,
+            """SELECT u.id, u.name, u.sector, u.username, u.email,
                     c.company_handle
                 FROM users u JOIN companies c ON c.id = u.company_id
                 WHERE u.id = ? AND u.company_id = ?""",
@@ -1201,6 +1544,7 @@ def update_user(user_id: str, payload: UserUpdateInput, session: dict = Depends(
         "name": row["name"],
         "sector": row["sector"],
         "username": row["username"],
+        "email": row["email"],
         "login": f'{row["username"]}.{row["company_handle"]}.routine',
     }
 

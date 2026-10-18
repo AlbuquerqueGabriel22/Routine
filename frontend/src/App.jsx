@@ -241,6 +241,9 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [toast, setToast] = useState("");
   const [modal, setModal] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [passwordPromptPending, setPasswordPromptPending] = useState(
+    account.role === "user" && Boolean(account.initial_password_pending),
+  );
   const isBoss = account.role === "company";
 
   useEffect(() => {
@@ -679,7 +682,12 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       </main>
 
       {toast && <div className="toast" role="status"><CheckCircle2 size={18} />{toast}</div>}
-      {acknowledgmentTask && !isBoss && (
+      {passwordPromptPending && (
+        <InitialPasswordPrompt
+          onComplete={() => setPasswordPromptPending(false)}
+        />
+      )}
+      {acknowledgmentTask && !isBoss && !passwordPromptPending && (
         <AcknowledgmentDialog
           task={acknowledgmentTask}
           now={taskNow}
@@ -829,7 +837,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 }
 
 function AuthPage({ initialError, onAuthenticated }) {
-  const [mode, setMode] = useState("login");
+  const [resetToken] = useState(() => new URLSearchParams(window.location.search).get("reset_token") || "");
+  const [mode, setMode] = useState(() => resetToken ? "reset" : "login");
   const [role, setRole] = useState("company");
   const [values, setValues] = useState({
     fantasy_name: "",
@@ -837,14 +846,23 @@ function AuthPage({ initialError, onAuthenticated }) {
     email: "",
     identifier: "",
     password: "",
+    password_confirmation: "",
   });
   const [error, setError] = useState(initialError);
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => setError(initialError), [initialError]);
+  useEffect(() => {
+    if (!resetToken) return;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("reset_token");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [resetToken]);
   function change(key, value) {
     setValues((current) => ({ ...current, [key]: value }));
     setError("");
+    setNotice("");
   }
   async function submit(event) {
     event.preventDefault();
@@ -862,6 +880,28 @@ function AuthPage({ initialError, onAuthenticated }) {
           }),
         });
         onAuthenticated(account);
+      } else if (mode === "forgot") {
+        const result = await api("/auth/password-reset/request", {
+          method: "POST",
+          body: JSON.stringify({
+            role,
+            identifier: values.identifier,
+            email: values.email,
+          }),
+        });
+        setNotice(result.message);
+      } else if (mode === "reset") {
+        if (values.password !== values.password_confirmation) {
+          throw new Error("As senhas não são iguais.");
+        }
+        const result = await api("/auth/password-reset/confirm", {
+          method: "POST",
+          body: JSON.stringify({ token: resetToken, password: values.password }),
+        });
+        setMode("login");
+        setRole(result.role);
+        setValues((current) => ({ ...current, password: "", password_confirmation: "" }));
+        setNotice(result.message);
       } else {
         const account = await api(`/auth/login-${role}`, {
           method: "POST",
@@ -877,12 +917,19 @@ function AuthPage({ initialError, onAuthenticated }) {
   }
 
   const registration = mode === "register";
+  const heading = registration
+    ? ["Cadastre sua empresa", "Crie o espaço da empresa e convide sua equipe."]
+    : mode === "forgot"
+      ? ["Recuperar acesso", "Informe seu login e o e-mail cadastrado para receber o link."]
+      : mode === "reset"
+        ? ["Criar nova senha", "Escolha uma senha nova para acessar sua conta."]
+        : ["Acesse sua rotina", "Entre para acompanhar as atividades da sua empresa."];
   return (
     <main className="auth-screen">
       <section className="auth-card">
         <div className="auth-brand"><span className="auth-brand-mark"><Leaf size={22} /></span><div><strong>Routiner</strong><small>GESTÃO DE LIMPEZA</small></div></div>
-        <div className="auth-heading"><span className="eyebrow">{registration ? "COMECE POR AQUI" : "BEM-VINDO DE VOLTA"}</span><h1>{registration ? "Cadastre sua empresa" : "Acesse sua rotina"}</h1><p>{registration ? "Crie o espaço da empresa e convide sua equipe." : "Entre para acompanhar as atividades da sua empresa."}</p></div>
-        {!registration && (
+        <div className="auth-heading"><span className="eyebrow">{registration ? "COMECE POR AQUI" : mode === "reset" ? "REDEFINIÇÃO DE SENHA" : mode === "forgot" ? "RECUPERAÇÃO DE SENHA" : "BEM-VINDO DE VOLTA"}</span><h1>{heading[0]}</h1><p>{heading[1]}</p></div>
+        {!registration && mode !== "reset" && (
           <div className="auth-role-switch" aria-label="Tipo de acesso">
             <button type="button" className={role === "company" ? "selected" : ""} onClick={() => { setRole("company"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Building2 size={16} /> Empresa / chefe</button>
             <button type="button" className={role === "user" ? "selected" : ""} onClick={() => { setRole("user"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Users size={16} /> Funcionário</button>
@@ -897,16 +944,28 @@ function AuthPage({ initialError, onAuthenticated }) {
               <div className="form-field"><label htmlFor="company-password">Senha <span className="field-hint-inline">mínimo de 8 caracteres</span></label><input id="company-password" type="password" autoComplete="new-password" required minLength={8} maxLength={128} placeholder="Crie uma senha segura" value={values.password} onChange={(event) => change("password", event.target.value)} /></div>
               <div className="auth-note"><ShieldCheck size={16} /><span>O cadastro cria o acesso do chefe. Ele poderá cadastrar funcionários e ver os registros da própria empresa.</span></div>
             </>
+          ) : mode === "reset" ? (
+            <>
+              <div className="form-field"><label htmlFor="reset-password">Nova senha</label><input id="reset-password" type="password" autoFocus required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Mínimo de 8 caracteres" value={values.password} onChange={(event) => change("password", event.target.value)} /></div>
+              <div className="form-field"><label htmlFor="reset-password-confirm">Confirme a nova senha</label><input id="reset-password-confirm" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Digite a senha novamente" value={values.password_confirmation} onChange={(event) => change("password_confirmation", event.target.value)} /></div>
+            </>
+          ) : mode === "forgot" ? (
+            <>
+              <div className="form-field"><label htmlFor="reset-identifier">{role === "company" ? "Login da empresa" : "Login do funcionário"}</label><input id="reset-identifier" autoCapitalize="none" required maxLength={150} placeholder={role === "company" ? "empresa.routine" : "usuario.empresa.routine"} value={values.identifier} onChange={(event) => change("identifier", event.target.value.toLowerCase().trim())} /></div>
+              <div className="form-field"><label htmlFor="reset-email">E-mail cadastrado</label><input id="reset-email" type="email" autoComplete="email" required maxLength={254} placeholder="voce@empresa.com.br" value={values.email} onChange={(event) => change("email", event.target.value)} /></div>
+            </>
           ) : (
             <>
               <div className="form-field"><label htmlFor="login-identifier">{role === "company" ? "Login da empresa" : "Login do funcionário"}</label><input id="login-identifier" autoCapitalize="none" autoComplete="username" required maxLength={150} placeholder={role === "company" ? "empresa.routine" : "usuario.empresa.routine"} value={values.identifier} onChange={(event) => change("identifier", event.target.value.toLowerCase().trim())} /><small className="field-hint">{role === "company" ? "O identificador escolhido no cadastro da empresa." : "Formato: usuario.identificador-da-empresa.routine."}</small></div>
               <div className="form-field"><label htmlFor="login-password">Senha</label><input id="login-password" type="password" autoComplete="current-password" required maxLength={128} placeholder="Sua senha" value={values.password} onChange={(event) => change("password", event.target.value)} /></div>
+              <button type="button" className="text-button auth-forgot-link" onClick={() => { setMode("forgot"); setNotice(""); setError(""); }}>Esqueceu a senha?</button>
             </>
           )}
           {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-          <button className="button-primary auth-submit" disabled={busy}>{busy && <LoaderCircle size={16} className="spin" />}{registration ? "Criar empresa" : "Entrar"}<ArrowRight size={16} /></button>
+          {notice && <div className="auth-note" role="status"><ShieldCheck size={16} /><span>{notice}</span></div>}
+          <button className="button-primary auth-submit" disabled={busy}>{busy && <LoaderCircle size={16} className="spin" />}{registration ? "Criar empresa" : mode === "forgot" ? "Enviar link" : mode === "reset" ? "Salvar nova senha" : "Entrar"}<ArrowRight size={16} /></button>
         </form>
-        <div className="auth-switch">{registration ? "Sua empresa já tem uma conta?" : "Ainda não tem uma empresa cadastrada?"} <button onClick={() => { setMode(registration ? "login" : "register"); setRole("company"); setError(""); }}> {registration ? "Entrar" : "Cadastrar empresa"}</button></div>
+        {mode === "forgot" || mode === "reset" ? <div className="auth-switch"><button onClick={() => { setMode("login"); setError(""); setNotice(""); }}>Voltar para entrar</button></div> : mode === "login" ? <div className="auth-switch">Ainda não tem uma empresa cadastrada? <button onClick={() => { setMode("register"); setRole("company"); setError(""); setNotice(""); }}>Cadastrar empresa</button></div> : <div className="auth-switch">Sua empresa já tem uma conta? <button onClick={() => { setMode("login"); setRole("company"); setError(""); setNotice(""); }}>Entrar</button></div>}
         <div className="auth-footer">Seus dados e registros ficam separados por empresa.</div>
       </section>
       <aside className="auth-aside"><div className="auth-orb orb-a" /><div className="auth-orb orb-b" /><div className="auth-aside-content"><div className="auth-aside-icon"><ClipboardCheck size={25} /></div><span>ROTINA ORGANIZADA. EQUIPE ALINHADA.</span><h2>O cuidado diário,<br />em um só lugar.</h2><p>Gerencie locais, acompanhe as atividades e dê à sua equipe uma rotina mais simples e transparente.</p><div className="auth-benefit"><span><Check size={14} /></span> Um espaço seguro para cada empresa</div><div className="auth-benefit"><span><Check size={14} /></span> Registros identificados por funcionário</div></div></aside>
@@ -934,8 +993,8 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
           <div className="filter-control"><Filter size={15} /><select value={pendingFilter} onChange={(event) => setPendingFilter(event.target.value)} aria-label="Filtrar equipe por pendências"><option value="">Todas as situações</option><option value="pending">Com pendências</option><option value="clear">Sem pendências</option></select><ChevronDown size={14} /></div>
         </div>
         {loading && !team.length ? <LoadingState /> : visibleTeam.length ? (
-          <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
-            {visibleTeam.map((member) => <tr key={member.id}><td data-label="Funcionário"><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td data-label="Setor">{member.sector}</td><td data-label="Login"><code className="login-code">{member.login}</code></td><td data-label="Demandas">{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at && !task.missed_at).length} pendentes</td><td data-label="Conta"><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
+          <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>E-MAIL DE RECUPERAÇÃO</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
+            {visibleTeam.map((member) => <tr key={member.id}><td data-label="Funcionário"><span className="table-person"><span className="person-initial">{initials(member.name)}</span><strong>{member.name}</strong></span></td><td data-label="Setor">{member.sector}</td><td data-label="Login"><code className="login-code">{member.login}</code></td><td data-label="E-mail de recuperação">{member.email || "Não informado"}</td><td data-label="Demandas">{tasks.filter((task) => task.assigned_user_id === member.id && !task.completed_at && !task.missed_at).length} pendentes</td><td data-label="Conta"><span className="team-status"><span className="status-dot" /> Ativa</span> <button className="icon-button" onClick={() => onEdit(member)} aria-label={`Editar ${member.name}`}><Pencil size={15} /></button></td></tr>)}
           </tbody></table></div>
         ) : team.length ? <EmptyState className="team-empty" icon={Filter} title="Nenhum funcionário neste filtro" description="Altere os filtros de setor ou de pendências para ver a equipe." /> : <EmptyState className="team-empty" icon={Users} title="Ainda não há funcionários" description="Cadastre um funcionário para que ele possa entrar e acompanhar as atividades do setor." action={<button className="button-primary" onClick={onAdd}><Plus size={16} /> Cadastrar primeiro funcionário</button>} />}
       </section>
@@ -1216,8 +1275,85 @@ function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
   );
 }
 
+function InitialPasswordPrompt({ onComplete }) {
+  const [mode, setMode] = useState("choice");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function keepPassword() {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/auth/initial-password/keep", { method: "POST" });
+      onComplete();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changePassword(event) {
+    event.preventDefault();
+    setError("");
+    if (newPassword !== passwordConfirmation) {
+      setError("As senhas novas não são iguais.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api("/auth/initial-password/change", {
+        method: "POST",
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      });
+      onComplete();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="initial-password-popover" role="dialog" aria-modal="false" aria-labelledby="initial-password-title">
+      <div className="initial-password-heading">
+        <span className="initial-password-icon"><KeyRound size={18} /></span>
+        <div><span className="eyebrow">PRIMEIRO ACESSO</span><h2 id="initial-password-title">Senha do funcionário</h2></div>
+      </div>
+      {mode === "choice" ? (
+        <>
+          <p>A empresa criou uma senha inicial para sua conta. Você prefere criar uma senha pessoal ou manter a atual?</p>
+          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+          <div className="initial-password-actions">
+            <button type="button" className="button-primary" disabled={busy} onClick={() => { setError(""); setMode("change"); }}>Mudar senha</button>
+            <button type="button" className="button-secondary" disabled={busy} onClick={keepPassword}>Manter senha atual</button>
+          </div>
+        </>
+      ) : (
+        <form className="initial-password-form" onSubmit={changePassword}>
+          <p>Digite a senha inicial e escolha uma nova senha. Ela será salva automaticamente na sua conta.</p>
+          <div className="form-field"><label htmlFor="initial-current-password">Senha inicial</label><input id="initial-current-password" type="password" autoComplete="current-password" required maxLength={128} autoFocus value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></div>
+          <div className="form-field"><label htmlFor="initial-new-password">Nova senha <span className="field-hint-inline">mínimo de 8 caracteres</span></label><input id="initial-new-password" type="password" autoComplete="new-password" required minLength={8} maxLength={128} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></div>
+          <div className="form-field"><label htmlFor="initial-password-confirmation">Confirme a nova senha</label><input id="initial-password-confirmation" type="password" autoComplete="new-password" required minLength={8} maxLength={128} value={passwordConfirmation} onChange={(event) => setPasswordConfirmation(event.target.value)} /></div>
+          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+          <div className="initial-password-actions">
+            <button type="button" className="button-secondary" disabled={busy} onClick={() => { setError(""); setMode("choice"); }}>Voltar</button>
+            <button className="button-primary" disabled={busy}>{busy && <LoaderCircle size={16} className="spin" />} Salvar senha</button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
 function UserForm({ company, sectors, saving, onClose, onSave }) {
-  const [values, setValues] = useState({ name: "", sector: "", username: "", password: "" });
+  const [values, setValues] = useState({ name: "", sector: "", username: "", email: "", password: "" });
   const [error, setError] = useState("");
   const login = values.username ? `${values.username.toLowerCase()}.${company.company_handle}.routine` : `usuario.${company.company_handle}.routine`;
   async function submit(event) {
@@ -1232,6 +1368,7 @@ function UserForm({ company, sectors, saving, onClose, onSave }) {
   return <Modal title="Cadastrar funcionário" subtitle="NOVA CONTA DA EQUIPE" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="employee-name">Nome completo <span className="required">*</span></label><input id="employee-name" autoFocus required minLength={2} maxLength={120} autoComplete="name" placeholder="Nome do funcionário" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="employee-email">E-mail para recuperação <span className="required">*</span></label><input id="employee-email" type="email" required maxLength={254} autoComplete="email" placeholder="funcionario@empresa.com.br" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} /><small className="field-hint">O link para redefinir a senha será enviado para este endereço.</small></div>
       <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><select id="employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}><option value="">Selecione um setor</option>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select>{!sectors.length && <small className="field-hint">Cadastre um setor no menu Equipe → Setores antes de incluir funcionários.</small>}</div>
       <div className="form-field"><label htmlFor="employee-username">Identificador de usuário <span className="required">*</span></label><div className="handle-input"><input id="employee-username" required minLength={2} maxLength={30} pattern="[A-Za-z0-9][A-Za-z0-9\-]{1,29}" placeholder="maria" value={values.username} onChange={(event) => setValues({ ...values, username: event.target.value.toLowerCase() })} /><span>.{company.company_handle}.routine</span></div><small className="field-hint">Login completo: <code>{login}</code></small></div>
       <div className="form-field"><label htmlFor="employee-password">Senha inicial <span className="required">*</span></label><input id="employee-password" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Mínimo de 8 caracteres" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} /><small className="field-hint">Compartilhe o login e a senha inicial com o funcionário.</small></div>
@@ -1243,7 +1380,7 @@ function UserForm({ company, sectors, saving, onClose, onSave }) {
 }
 
 function UserEditForm({ member, sectors, saving, onClose, onSave }) {
-  const [values, setValues] = useState({ name: member.name, sector: member.sector });
+  const [values, setValues] = useState({ name: member.name, sector: member.sector, email: member.email || "" });
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
@@ -1257,6 +1394,7 @@ function UserEditForm({ member, sectors, saving, onClose, onSave }) {
   return <Modal title="Editar funcionário" subtitle="EQUIPE E SETOR" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="edit-employee-name">Nome completo</label><input id="edit-employee-name" required minLength={2} maxLength={120} value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
+      <div className="form-field"><label htmlFor="edit-employee-email">E-mail para recuperação</label><input id="edit-employee-email" type="email" required maxLength={254} autoComplete="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} /></div>
       <div className="form-field"><label htmlFor="edit-employee-sector">Setor</label><select id="edit-employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Salvar alterações</button></footer>
@@ -1490,11 +1628,41 @@ function Modal({ title, subtitle, children, onClose, wide = false }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}><header className="modal-header"><div><div className="eyebrow">{subtitle}</div><h2>{title}</h2></div><button className="icon-button modal-close" onClick={onClose} aria-label="Fechar"><X size={19} /></button></header>{children}</section></div>;
 }
 
-function ImageField({ label, value, onChange }) {
+function ImageField({ label, value, onChange, allowCamera = false }) {
+  const galleryInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [cameraOpen, setCameraOpen] = useState(false);
   const preview = useMemo(() => typeof value === "string" ? value : value ? URL.createObjectURL(value) : "", [value]);
   useEffect(() => () => { if (value instanceof File) URL.revokeObjectURL(preview); }, [preview, value]);
+  useEffect(() => () => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+  }, []);
+  useEffect(() => {
+    if (cameraOpen && videoRef.current && streamRef.current) videoRef.current.srcObject = streamRef.current;
+  }, [cameraOpen]);
+  function stopCamera() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }
+  async function openCamera() {
+    setUploadError("");
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setUploadError("A câmera não está disponível neste dispositivo.");
+      return;
+    }
+    try {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } },
+        audio: false,
+      });
+      setCameraOpen(true);
+    } catch (error) {
+      setUploadError(`Não foi possível acessar a câmera: ${error.message}`);
+    }
+  }
   async function upload(file) {
     if (!file) return;
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
@@ -1517,6 +1685,56 @@ function ImageField({ label, value, onChange }) {
     } finally {
       setUploading(false);
     }
+  }
+  function capturePhoto() {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video.videoHeight) {
+      setUploadError("A câmera ainda está carregando. Tente novamente em instantes.");
+      return;
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      setUploadError("Não foi possível preparar a captura da foto.");
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setUploadError("Não foi possível capturar a foto. Tente novamente.");
+        return;
+      }
+      setCameraOpen(false);
+      stopCamera();
+      void upload(new File([blob], "foto-do-local.jpg", { type: "image/jpeg" }));
+    }, "image/jpeg", 0.9);
+  }
+  if (allowCamera) {
+    return <div className="form-field"><label>{label}</label>
+      {cameraOpen ? (
+        <div className="camera-preview location-camera">
+          <video ref={videoRef} autoPlay playsInline muted />
+          <div className="location-photo-actions">
+            <button type="button" className="button-primary" disabled={uploading} onClick={capturePhoto}><Camera size={16} /> Tirar foto</button>
+            <button type="button" className="button-secondary" onClick={() => { setCameraOpen(false); stopCamera(); }}>Cancelar</button>
+          </div>
+        </div>
+      ) : (
+        <div className="location-photo-picker">
+          {preview && <img className="location-photo-preview" src={preview} alt={`Prévia: ${label}`} />}
+          {uploading && <div className="location-photo-uploading"><LoaderCircle className="spin" size={18} /> Enviando imagem…</div>}
+          <div className="location-photo-actions">
+            <button type="button" className="button-secondary" disabled={uploading} onClick={() => galleryInputRef.current?.click()}><ImagePlus size={16} />{preview ? "Escolher da galeria" : "Adicionar da galeria"}</button>
+            <button type="button" className="button-secondary" disabled={uploading} onClick={openCamera}><Camera size={16} /> Tirar foto</button>
+          </div>
+          <small className="field-hint">Escolha uma imagem JPG, PNG ou WEBP de até 5 MB ou tire uma foto agora.</small>
+          <input ref={galleryInputRef} className="location-gallery-input" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} />
+        </div>
+      )}
+      {uploadError && <span className="field-error">{uploadError}</span>}
+    </div>;
   }
   return <div className="form-field"><label>{label}</label><label className={`image-upload ${preview ? "has-image" : ""}`}>
     {preview ? <><img src={preview} alt={`Prévia: ${label}`} /><span className="image-change"><Pencil size={14} /> Trocar foto</span></> : <><span className="image-upload-icon">{uploading ? <LoaderCircle className="spin" size={20} /> : <ImagePlus size={20} />}</span><strong>{uploading ? "Enviando imagem…" : "Adicionar foto"}</strong><small>JPG, PNG ou WEBP · até 5 MB</small></>}
@@ -1573,7 +1791,7 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
   }
   return <Modal title={item ? "Editar local" : "Novo local"} subtitle="CADASTRO DE AMBIENTE" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
-      <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} />
+      <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} allowCamera />
       <div className="form-field"><label htmlFor="location-name">Área de atuação <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Fogão, exaustor, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-row">
         <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => { setSector(event.target.value); change("responsible_user_id", ""); }}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>

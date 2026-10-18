@@ -79,6 +79,17 @@ function deadlineCountdown(value, now = Date.now()) {
   return `Vence em ${minutes} ${minutes === 1 ? "minuto" : "minutos"}`;
 }
 
+function localDateValue(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function isTaskForToday(task, now = Date.now()) {
+  const occurrenceDate = task.scheduled_for || localDateValue(task.deadline);
+  return occurrenceDate.slice(0, 10) === localDateValue(new Date(now));
+}
+
 async function api(path, options = {}) {
   let response;
   try {
@@ -299,9 +310,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   useEffect(() => {
     if (isBoss) return;
-    const pending = tasks.find((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) || null;
+    const pending = tasks.find((task) => isTaskForToday(task, taskNow)
+      && !task.acknowledged_at && !task.completed_at && !task.missed_at) || null;
     setAcknowledgmentTask((current) => current?.id === pending?.id ? current : pending);
-  }, [isBoss, tasks]);
+  }, [isBoss, tasks, taskNow]);
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
@@ -1003,7 +1015,8 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
 
 function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onComplete }) {
   const [sector, setSector] = useState("");
-  const sectorTasks = tasks.filter((task) => !isBoss || !sector || sameSector(task.assignee_sector, sector));
+  const sectorTasks = tasks.filter((task) => isTaskForToday(task, now)
+    && (!isBoss || !sector || sameSector(task.assignee_sector, sector)));
   const pending = sectorTasks.filter((task) => !task.completed_at && !task.missed_at);
   const completed = sectorTasks.filter((task) => task.completed_at || task.missed_at);
   return (
@@ -1012,8 +1025,8 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
         eyebrow={isBoss ? "GESTÃO DA EQUIPE" : "SUA ROTINA"}
         title="Tarefas com prazo"
         description={isBoss
-          ? "Atribua tarefas, acompanhe a ciência da equipe e confira as conclusões."
-          : "Acompanhe as tarefas do seu setor e registre execuções em apoio à equipe."}
+          ? "Acompanhe as tarefas previstas para hoje, a ciência da equipe e as conclusões."
+          : "Veja as tarefas previstas para hoje no seu setor e registre as execuções."}
         action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
       />
       {isBoss && <div className="toolbar panel"><div className="toolbar-copy"><span className="result-count">{sectorTasks.length}</span><span>{sectorTasks.length === 1 ? "tarefa" : "tarefas"}</span></div><div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div></div>}
@@ -1049,11 +1062,11 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
               );
             })}
           </div>
-        ) : <EmptyState className="task-empty" icon={ListChecks} title="Nenhuma tarefa pendente" description={isBoss ? "Crie uma tarefa e defina a pessoa responsável e o prazo." : "Quando a empresa atribuir uma tarefa, ela aparecerá aqui."} action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>} />}
+        ) : <EmptyState className="task-empty" icon={ListChecks} title="Nenhuma tarefa pendente para hoje" description={isBoss ? "As tarefas programadas para outros dias aparecerão na data prevista. Você também pode criar uma tarefa avulsa." : "As tarefas programadas aparecerão aqui no dia previsto para execução."} action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>} />}
       </section>
       {completed.length > 0 && (
         <section className="task-section completed-tasks">
-          <div className="section-head"><div><h2>Concluídas e vencidas</h2><p>{completed.length} {completed.length === 1 ? "registro" : "registros"} finalizados</p></div></div>
+          <div className="section-head"><div><h2>Concluídas e vencidas hoje</h2><p>{completed.length} {completed.length === 1 ? "registro" : "registros"} finalizados</p></div></div>
           <div className="task-list">
             {completed.map((task) => (
               <article className="panel task-card task-card-complete" key={task.id}>

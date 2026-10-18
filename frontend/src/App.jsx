@@ -39,7 +39,6 @@ import {
 } from "lucide-react";
 
 const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
-const STATUSES = ["Limpo", "Não limpo"];
 const WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
 const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase("pt-BR")
   === String(right || "").trim().toLocaleLowerCase("pt-BR");
@@ -1845,7 +1844,7 @@ function Modal({ title, subtitle, children, onClose, wide = false }) {
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className={`modal ${wide ? "modal-wide" : ""}`} role="dialog" aria-modal="true" aria-label={title}><header className="modal-header"><div><div className="eyebrow">{subtitle}</div><h2>{title}</h2></div><button className="icon-button modal-close" onClick={onClose} aria-label="Fechar"><X size={19} /></button></header>{children}</section></div>;
 }
 
-function ImageField({ label, value, onChange, allowCamera = false }) {
+function ImageField({ label, value, onChange, allowCamera = false, disabled = false }) {
   const galleryInputRef = useRef(null);
   const videoRef = useRef(null);
   const streamRef = useRef(null);
@@ -1943,11 +1942,11 @@ function ImageField({ label, value, onChange, allowCamera = false }) {
           {preview && <img className="location-photo-preview" src={preview} alt={`Prévia: ${label}`} />}
           {uploading && <div className="location-photo-uploading"><LoaderCircle className="spin" size={18} /> Enviando imagem…</div>}
           <div className="location-photo-actions">
-            <button type="button" className="button-secondary" disabled={uploading} onClick={() => galleryInputRef.current?.click()}><ImagePlus size={16} />{preview ? "Escolher da galeria" : "Adicionar da galeria"}</button>
-            <button type="button" className="button-secondary" disabled={uploading} onClick={openCamera}><Camera size={16} /> Tirar foto</button>
+            <button type="button" className="button-secondary" disabled={disabled || uploading} onClick={() => galleryInputRef.current?.click()}><ImagePlus size={16} />{preview ? "Escolher da galeria" : "Adicionar da galeria"}</button>
+            <button type="button" className="button-secondary" disabled={disabled || uploading} onClick={openCamera}><Camera size={16} /> Tirar foto</button>
           </div>
           <small className="field-hint">Escolha uma imagem JPG, PNG ou WEBP de até 5 MB ou tire uma foto agora.</small>
-          <input ref={galleryInputRef} className="location-gallery-input" type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} />
+          <input ref={galleryInputRef} className="location-gallery-input" type="file" accept="image/jpeg,image/png,image/webp" disabled={disabled || uploading} onChange={(event) => { void upload(event.target.files?.[0]); event.target.value = ""; }} />
         </div>
       )}
       {uploadError && <span className="field-error">{uploadError}</span>}
@@ -1955,7 +1954,7 @@ function ImageField({ label, value, onChange, allowCamera = false }) {
   }
   return <div className="form-field"><label>{label}</label><label className={`image-upload ${preview ? "has-image" : ""}`}>
     {preview ? <><img src={preview} alt={`Prévia: ${label}`} /><span className="image-change"><Pencil size={14} /> Trocar foto</span></> : <><span className="image-upload-icon">{uploading ? <LoaderCircle className="spin" size={20} /> : <ImagePlus size={20} />}</span><strong>{uploading ? "Enviando imagem…" : "Adicionar foto"}</strong><small>JPG, PNG ou WEBP · até 5 MB</small></>}
-    <input type="file" accept="image/jpeg,image/png,image/webp" disabled={uploading} onChange={(event) => upload(event.target.files?.[0])} />
+    <input type="file" accept="image/jpeg,image/png,image/webp" disabled={disabled || uploading} onChange={(event) => upload(event.target.files?.[0])} />
   </label>{uploadError && <span className="field-error">{uploadError}</span>}</div>;
 }
 
@@ -2036,11 +2035,11 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   const [values, setValues] = useState({
     location_id: initialLocationId,
     cleaning_date: item?.cleaning_date || todayValue(),
-    status: item?.status || "Limpo",
     photo_before: item?.photo_before || "",
     photo_after: item?.photo_after || "",
     notes: item?.notes || "",
   });
+  const status = values.photo_before && values.photo_after ? "Limpo" : "Não limpo";
   const sectorOptions = [...new Set(locations.map((location) => location.responsible_sector).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "pt-BR"));
   const typeOptions = [...new Set(locations
@@ -2054,8 +2053,8 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   async function submit(event) {
     event.preventDefault();
-    if (!values.location_id || !values.cleaning_date || !values.status) {
-      setError("Selecione o local, a data e o status do registro.");
+    if (!values.location_id || !values.cleaning_date) {
+      setError("Selecione o local e a data do registro.");
       return;
     }
     setError("");
@@ -2071,8 +2070,14 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
         <div className="form-field"><label htmlFor="cleaning-location">A ser limpo <span className="required">*</span></label><select id="cleaning-location" required disabled={!cleaningType} value={values.location_id} onChange={(event) => change("location_id", event.target.value)}><option value="">Selecione um item</option>{itemOptions.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></div>
         <div className="form-field"><label htmlFor="cleaning-date">Data <span className="required">*</span></label><input id="cleaning-date" type="date" value={values.cleaning_date} onChange={(event) => change("cleaning_date", event.target.value)} /></div>
       </div>
-      <div className="form-field"><label>Status <span className="required">*</span></label><div className="status-choice">{STATUSES.map((status) => <button type="button" key={status} onClick={() => change("status", status)} className={`status-option ${values.status === status ? `selected ${status === "Limpo" ? "selected-done" : "selected-attention"}` : ""}`}><span className={`choice-icon ${status === "Limpo" ? "done" : "attention"}`}>{status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span><strong>{status}</strong><small>{status === "Limpo" ? "Atividade concluída" : "Precisa ser refeita"}</small></span>{values.status === status && <CheckCircle2 size={17} className="choice-check" />}</button>)}</div></div>
-      <div className="form-row image-fields"><ImageField label="Foto antes" value={values.photo_before} onChange={(value) => change("photo_before", value)} /><ImageField label="Foto depois" value={values.photo_after} onChange={(value) => change("photo_after", value)} /></div>
+      <div className="cleaning-auto-status" role="status" aria-live="polite">
+        <span className={`status-pill ${status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{status}</span>
+        <span>{status === "Limpo" ? "As fotos antes e depois foram adicionadas." : "O registro só ficará Limpo após adicionar as duas fotos."}</span>
+      </div>
+      <div className="form-row image-fields">
+        <ImageField label="Foto antes (inicial)" value={values.photo_before} onChange={(value) => change("photo_before", value)} />
+        <ImageField label="Foto depois (final)" value={values.photo_after} onChange={(value) => change("photo_after", value)} disabled={!values.photo_before} />
+      </div>
       <div className="form-field"><label htmlFor="cleaning-notes">Observações <span className="optional">(opcional)</span></label><textarea id="cleaning-notes" rows="3" maxLength={1000} placeholder="Adicione algum detalhe sobre esta atividade…" value={values.notes} onChange={(event) => change("notes", event.target.value)} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Registrar atividade"}</button></footer>

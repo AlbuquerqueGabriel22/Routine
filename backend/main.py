@@ -363,6 +363,19 @@ def initialize_database():
         add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
+        conn.execute(
+            """UPDATE cleanings
+                SET status = CASE
+                    WHEN NULLIF(trim(photo_before), '') IS NOT NULL
+                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Limpo'
+                    ELSE 'Não limpo'
+                END
+                WHERE status != CASE
+                    WHEN NULLIF(trim(photo_before), '') IS NOT NULL
+                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Limpo'
+                    ELSE 'Não limpo'
+                END"""
+        )
         add_column_if_missing(conn, "tasks", "completion_notes TEXT NOT NULL DEFAULT ''")
         add_column_if_missing(conn, "tasks", "photo_before TEXT")
         add_column_if_missing(conn, "tasks", "photo_after TEXT")
@@ -644,7 +657,6 @@ class LocationInput(BaseModel):
 class CleaningInput(BaseModel):
     location_id: str
     cleaning_date: date
-    status: str
     photo_before: str | None = None
     photo_after: str | None = None
     notes: Annotated[str, Field(max_length=1000)] = ""
@@ -902,11 +914,6 @@ def company_only(session: dict = Depends(current_session)) -> dict:
 def validate_frequency(frequency: str):
     if frequency not in FREQUENCIES:
         raise HTTPException(status_code=422, detail="Frequência inválida.")
-
-
-def validate_status(status: str):
-    if status not in STATUSES:
-        raise HTTPException(status_code=422, detail="Status inválido.")
 
 
 def company_row(conn: sqlite3.Connection, company_id: str):
@@ -2393,7 +2400,7 @@ def delete_missed_task(
 
 @app.post("/api/history", status_code=201)
 def create_cleaning(payload: CleaningInput, session: dict = Depends(current_session)):
-    validate_status(payload.status)
+    status = "Limpo" if payload.photo_before and payload.photo_after else "Não limpo"
     cleaning_id = str(uuid.uuid4())
     with connection() as conn:
         require_location_access(conn, payload.location_id, session)
@@ -2406,7 +2413,7 @@ def create_cleaning(payload: CleaningInput, session: dict = Depends(current_sess
                 cleaning_id,
                 payload.location_id,
                 payload.cleaning_date.isoformat(),
-                payload.status,
+                status,
                 payload.photo_before,
                 payload.photo_after,
                 payload.notes,

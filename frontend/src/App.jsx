@@ -48,7 +48,7 @@ const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase(
 const navItems = [
   { id: "dashboard", label: "Visão geral", icon: LayoutDashboard },
   { id: "tasks", label: "Tarefas", icon: ListChecks },
-  { id: "locations", label: "Locais", icon: Leaf, companyOnly: true },
+  { id: "locations", label: "Limpeza", icon: Leaf, companyOnly: true },
   { id: "history", label: "Histórico", icon: ClipboardCheck },
   { id: "team", label: "Equipe", icon: Users, companyOnly: true },
 ];
@@ -548,7 +548,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder={page === "history" ? "Buscar no histórico..." : page === "locations" ? "Buscar locais..." : page === "tasks" ? "Buscar tarefas..." : "Buscar..."}
+                placeholder={page === "history" ? "Buscar no histórico..." : page === "locations" ? "Buscar itens..." : page === "tasks" ? "Buscar tarefas..." : "Buscar..."}
                 aria-label="Buscar"
               />
               {query && <button type="button" className="search-clear" onClick={() => setQuery("")} aria-label="Limpar busca"><X size={14} /></button>}
@@ -632,7 +632,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               setResponsible={setResponsibleFilter}
               photo={photoFilter}
               setPhoto={setPhotoFilter}
-              sectors={sectors}
               isBoss={isBoss}
               onAdd={() => setModal({ type: "location" })}
               onEdit={(item) => setModal({ type: "location", item })}
@@ -1502,7 +1501,7 @@ function DashboardPage({ data, loading, locations, history, account, isBoss, onN
         </section>
         <section className="panel quick-panel">
           <div className="section-head"><div><h2>Acesso rápido</h2><p>O que você precisa fazer?</p></div></div>
-          {isBoss && <button className="quick-action" onClick={() => onNavigate("locations")}><span className="quick-icon sage"><Leaf size={18} /></span><span><strong>Explorar locais</strong><small>{locations.length} {locations.length === 1 ? "local cadastrado" : "locais cadastrados"}</small></span><ArrowRight size={16} /></button>}
+          {isBoss && <button className="quick-action" onClick={() => onNavigate("locations")}><span className="quick-icon sage"><Leaf size={18} /></span><span><strong>Explorar limpeza</strong><small>{locations.length} {locations.length === 1 ? "item cadastrado" : "itens cadastrados"}</small></span><ArrowRight size={16} /></button>}
           <button className="quick-action" onClick={() => onAddCleaning()}><span className="quick-icon blue"><ClipboardCheck size={18} /></span><span><strong>Registrar limpeza</strong><small>Adicionar ao histórico</small></span><ArrowRight size={16} /></button>
           <div className="quick-tip"><Sparkles size={16} /><span>Registros consistentes ajudam sua equipe a manter uma rotina organizada.</span></div>
         </section>
@@ -1515,20 +1514,37 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
   return <article className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tint}`}><Icon size={18} /></span></div><div className="stat-number">{loading ? <span className="skeleton-number" /> : value}</div><div className="stat-hint">{hint}</div></article>;
 }
 
-function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, sectors, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
+function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
   const [sector, setSector] = useState("");
-  const responsibleOptions = [...new Set(allLocations
+  const [cleaningType, setCleaningType] = useState("");
+  const [itemId, setItemId] = useState("");
+  const sectorOptions = [...new Set(allLocations.map((location) => location.responsible_sector).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = [...new Set(allLocations
     .filter((location) => !sector || sameSector(location.responsible_sector, sector))
+    .map((location) => location.cleaning_type || "Estrutural"))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const itemOptions = allLocations.filter((location) =>
+    (!sector || sameSector(location.responsible_sector, sector))
+      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
+  const responsibleOptions = [...new Set(allLocations
+    .filter((location) => (!sector || sameSector(location.responsible_sector, sector))
+      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType))
     .map((location) => location.responsible))]
     .sort((a, b) => a.localeCompare(b, "pt-BR"));
-  const sectorLocations = locations.filter((location) => !sector || sameSector(location.responsible_sector, sector));
+  const sectorLocations = locations.filter((location) =>
+    (!sector || sameSector(location.responsible_sector, sector))
+      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType)
+      && (!itemId || location.id === itemId));
   return (
     <>
-      <PageHeading eyebrow="ORGANIZAÇÃO" title="Locais da empresa" description={isBoss ? "Gerencie os ambientes e acompanhe a rotina de cada um." : "Consulte os ambientes da empresa e registre as atividades sob seu usuário."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo local</button>} />
-      <div className="toolbar panel">
-        <div className="toolbar-copy"><span className="result-count">{sectorLocations.length}</span><span>{sectorLocations.length === 1 ? "local" : "locais"}{sectorLocations.length !== allLocations.length ? ` de ${allLocations.length}` : ""}</span></div>
-        <div className="toolbar-filters">
-          {isBoss && <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setResponsible(""); }} aria-label="Filtrar por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>}
+      <PageHeading eyebrow="ORGANIZAÇÃO" title="Limpeza" description={isBoss ? "Cadastre os itens que devem ser limpos e organize-os por setor e tipo de limpeza." : "Consulte os itens de limpeza do seu setor e registre as atividades."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo item</button>} />
+      <div className="toolbar panel cleaning-toolbar">
+        <div className="toolbar-copy"><span className="result-count">{sectorLocations.length}</span><span>{sectorLocations.length === 1 ? "item" : "itens"}</span></div>
+        <div className="toolbar-filters cleaning-filters">
+          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); setItemId(""); setResponsible(""); }} aria-label="Filtrar por setor"><option value="">Todos os setores</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Filter size={15} /><select value={cleaningType} disabled={!sector} onChange={(event) => { setCleaningType(event.target.value); setItemId(""); setResponsible(""); }} aria-label="Filtrar por tipo de limpeza"><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Leaf size={15} /><select value={itemId} disabled={!cleaningType} onChange={(event) => setItemId(event.target.value)} aria-label="Filtrar por item a ser limpo"><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><Filter size={16} /><select value={frequency} onChange={(event) => setFrequency(event.target.value)} aria-label="Filtrar por frequência"><option value="">Todas as frequências</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><Users size={15} /><select value={responsible} onChange={(event) => setResponsible(event.target.value)} aria-label="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><ImagePlus size={15} /><select value={photo} onChange={(event) => setPhoto(event.target.value)} aria-label="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></select><ChevronDown size={14} /></div>
@@ -1547,14 +1563,14 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
               </div>
               <div className="location-card-body">
                 <button className="location-name-button" onClick={() => onView(location)}><h3>{location.name}</h3><ArrowUpRight size={16} /></button>
-                <div className="location-meta"><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time)}</span></div>
+                <div className="location-meta"><span><Filter size={14} />{location.cleaning_type || "Estrutural"}</span><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time)}</span></div>
                 <div className="location-card-bottom"><span>{location.cleaning_count === 1 ? "1 registro" : `${location.cleaning_count || 0} registros`} · {formatDate(location.last_cleaned)}</span><button className="text-button compact" onClick={() => onAddCleaning(location)}><Plus size={14} /> Registrar</button></div>
               </div>
             </article>
           ))}
         </section>
       ) : (
-        <EmptyState className="large-empty" icon={Leaf} title={allLocations.length ? "Nenhum local encontrado" : "Comece cadastrando um local"} description={allLocations.length ? "Tente mudar a busca ou os filtros aplicados." : "Adicione um ambiente para organizar sua rotina de limpeza."} action={!allLocations.length && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar primeiro local</button>} />
+        <EmptyState className="large-empty" icon={Leaf} title={allLocations.length ? "Nenhum item encontrado" : "Comece cadastrando um item"} description={allLocations.length ? "Tente mudar a busca ou os filtros aplicados." : "Cadastre os itens e associe cada um a um setor e tipo de limpeza."} action={!allLocations.length && isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar primeiro item</button>} />
       )}
     </>
   );
@@ -1576,9 +1592,9 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
       <section className="panel history-panel">
         {loading && !entries.length ? <LoadingState /> : filteredEntries.length ? (
           <div className="table-scroll"><table className="history-table">
-            <thead><tr><th>ÁREA</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>SETOR</th><th>DATA E HORA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
+            <thead><tr><th>A SER LIMPO</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>SETOR</th><th>DATA E HORA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
-              <td data-label="Área"><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
+              <td data-label="A ser limpo"><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
               <td data-label="Responsável"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
               <td data-label="Execução">{entry.executor_name || (entry.status === "Não feito" ? "—" : entry.created_by_name) || "—"}</td>
               <td data-label="Setor">{entry.responsible_sector || "—"}</td>
@@ -1752,6 +1768,7 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
     }
     return {
       name: item?.name || "",
+      cleaning_type: item?.cleaning_type || "Estrutural",
       responsible: item?.responsible || "",
       responsible_user_id: item?.responsible_user_id || "",
       frequency: item?.frequency || "",
@@ -1776,47 +1793,62 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
   async function submit(event) {
     event.preventDefault();
     const responsible = sectorTeam.find((member) => member.id === values.responsible_user_id);
-    if (!values.name.trim() || !responsible || !values.schedule_days.length) {
-      setError("Preencha a área, o responsável e ao menos um dia da rotina.");
+    if (!values.name.trim() || !values.cleaning_type.trim() || !responsible || !values.schedule_days.length) {
+      setError("Preencha o item, o tipo de limpeza, o responsável e ao menos um dia da rotina.");
       return;
     }
     setError("");
     await onSave({
       ...values,
       name: values.name.trim(),
+      cleaning_type: values.cleaning_type.trim(),
       sector,
       responsible: responsible.name,
       frequency: values.schedule_days.length === 7 ? "Diário" : "Semanal",
     }, item?.id);
   }
-  return <Modal title={item ? "Editar local" : "Novo local"} subtitle="CADASTRO DE AMBIENTE" onClose={onClose}>
+  return <Modal title={item ? "Editar item de limpeza" : "Novo item de limpeza"} subtitle="CADASTRO DE ITEM" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} allowCamera />
-      <div className="form-field"><label htmlFor="location-name">Área de atuação <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Fogão, exaustor, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-row">
         <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => { setSector(event.target.value); change("responsible_user_id", ""); }}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><input id="location-cleaning-type" required minLength={2} maxLength={80} placeholder="Ex.: Estrutural" value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)} /></div>
       </div>
+      <div className="form-field"><label htmlFor="location-name">A ser limpo <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Chão, paredes, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
+      <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
       <fieldset className="schedule-days-field">
         <legend>Dias da rotina <span className="required">*</span></legend>
         <div className="schedule-days">{WEEKDAYS.map((label, day) => <label className={values.schedule_days.includes(day) ? "selected" : ""} key={label}><input type="checkbox" checked={values.schedule_days.includes(day)} onChange={() => toggleDay(day)} /><span>{label}</span></label>)}</div>
       </fieldset>
       <div className="form-field"><label htmlFor="location-schedule-time">Horário limite <span className="required">*</span></label><input id="location-schedule-time" type="time" required value={values.schedule_time} onChange={(event) => change("schedule_time", event.target.value)} /><small className="field-hint">A tarefa será criada automaticamente para cada dia selecionado. Se não for concluída até esse horário, irá para o histórico como “Não feito”.</small></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer">{item && <button type="button" className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir</button>}<span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Cadastrar local"}</button></footer>
+      <footer className="modal-footer">{item && <button type="button" className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir</button>}<span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Cadastrar item"}</button></footer>
     </form>
   </Modal>;
 }
 
 function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
+  const initialLocationId = item?.location_id || initial?.location_id || "";
+  const initialLocation = locations.find((location) => location.id === initialLocationId);
+  const [sector, setSector] = useState(initialLocation?.responsible_sector || "");
+  const [cleaningType, setCleaningType] = useState(initialLocation?.cleaning_type || "");
   const [values, setValues] = useState({
-    location_id: item?.location_id || initial?.location_id || locations[0]?.id || "",
+    location_id: initialLocationId,
     cleaning_date: item?.cleaning_date || todayValue(),
     status: item?.status || "Limpo",
     photo_before: item?.photo_before || "",
     photo_after: item?.photo_after || "",
     notes: item?.notes || "",
   });
+  const sectorOptions = [...new Set(locations.map((location) => location.responsible_sector).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = [...new Set(locations
+    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
+    .map((location) => location.cleaning_type || "Estrutural"))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const itemOptions = locations.filter((location) =>
+    (!sector || sameSector(location.responsible_sector, sector))
+      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   async function submit(event) {
@@ -1829,9 +1861,13 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
     await onSave(values, item?.id);
   }
   return <Modal title={item ? "Editar registro" : "Registrar limpeza"} subtitle="HISTÓRICO DE ATIVIDADES" onClose={onClose} wide>
-    {!locations.length ? <div className="modal-empty"><Leaf size={24} /><p>Cadastre um local antes de registrar uma limpeza.</p><button className="button-secondary" onClick={onClose}>Entendi</button></div> : <form className="modal-form" onSubmit={submit}>
+    {!locations.length ? <div className="modal-empty"><Leaf size={24} /><p>Cadastre um item na aba Limpeza antes de registrar uma limpeza.</p><button className="button-secondary" onClick={onClose}>Entendi</button></div> : <form className="modal-form" onSubmit={submit}>
       <div className="form-row">
-        <div className="form-field"><label htmlFor="cleaning-location">Local <span className="required">*</span></label><select id="cleaning-location" value={values.location_id} onChange={(event) => change("location_id", event.target.value)}><option value="">Selecione um local</option>{locations.map((location) => <option value={location.id} key={location.id}>{location.name} · {location.responsible}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="cleaning-sector">Setor <span className="required">*</span></label><select id="cleaning-sector" required value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); change("location_id", ""); }}><option value="">Selecione um setor</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="cleaning-type">Tipo de limpeza <span className="required">*</span></label><select id="cleaning-type" required disabled={!sector} value={cleaningType} onChange={(event) => { setCleaningType(event.target.value); change("location_id", ""); }}><option value="">Selecione um tipo</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+      </div>
+      <div className="form-row">
+        <div className="form-field"><label htmlFor="cleaning-location">A ser limpo <span className="required">*</span></label><select id="cleaning-location" required disabled={!cleaningType} value={values.location_id} onChange={(event) => change("location_id", event.target.value)}><option value="">Selecione um item</option>{itemOptions.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></div>
         <div className="form-field"><label htmlFor="cleaning-date">Data <span className="required">*</span></label><input id="cleaning-date" type="date" value={values.cleaning_date} onChange={(event) => change("cleaning_date", event.target.value)} /></div>
       </div>
       <div className="form-field"><label>Status <span className="required">*</span></label><div className="status-choice">{STATUSES.map((status) => <button type="button" key={status} onClick={() => change("status", status)} className={`status-option ${values.status === status ? `selected ${status === "Limpo" ? "selected-done" : "selected-attention"}` : ""}`}><span className={`choice-icon ${status === "Limpo" ? "done" : "attention"}`}>{status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span><strong>{status}</strong><small>{status === "Limpo" ? "Atividade concluída" : "Precisa ser refeita"}</small></span>{values.status === status && <CheckCircle2 size={17} className="choice-check" />}</button>)}</div></div>
@@ -1867,13 +1903,13 @@ function PhotoView({ label, photo }) {
 }
 
 function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, isBoss }) {
-  return <Modal title={item.name} subtitle="DETALHES DO LOCAL" onClose={onClose} wide>
+  return <Modal title={item.name} subtitle="DETALHES DO ITEM DE LIMPEZA" onClose={onClose} wide>
     <div className="location-detail-content">
       {item.photo && <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />}
-      <div className="detail-info-grid"><div><span>Área de atuação</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
+      <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
       <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
       {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
-      <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar local</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
+      <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar item</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
     </div>
   </Modal>;
 }

@@ -8,10 +8,11 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Cadastro de funcionários pela empresa, com setor, identificador e senha.
 - No primeiro acesso de um funcionário recém-cadastrado, o app pergunta se ele quer trocar a senha inicial ou mantê-la. A nova senha é salva na conta; a escolha é lembrada nos próximos acessos.
 - Cadastro e organização de setores por empresa; filtros de locais, tarefas e histórico são preenchidos pelos setores cadastrados e acompanham os novos setores. Funcionários e responsáveis de locais são vinculados a um setor. A empresa pode editar o nome/setor de funcionários e alterar os dados, o prazo e o responsável das demandas pendentes.
-- No cadastro e na edição de locais, a foto pode ser selecionada da galeria ou capturada na hora pela câmera.
+- Na aba **Limpeza**, a empresa cadastra cada item a ser limpo, seu setor, tipo de limpeza e rotina. Os filtros de setor, tipo e item são liberados em sequência; o tipo inicial é “Estrutural” e pode ser personalizado pela empresa.
+- No cadastro e na edição de itens de limpeza, a foto pode ser selecionada da galeria ou capturada na hora pela câmera.
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
 - Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado do setor selecionado.
-- Cada local pode ter uma rotina automática: escolha setor, área, responsável, dias da semana e horário limite. Uma tarefa é criada para cada ocorrência programada e fica disponível para o setor do responsável.
+- Cada item de limpeza pode ter uma rotina automática: escolha setor, tipo de limpeza, item, responsável, dias da semana e horário limite. Uma tarefa é criada para cada ocorrência programada e fica disponível para o setor do responsável.
 - Tarefas que não forem concluídas até o prazo passam automaticamente ao histórico como “Não feito” e não podem ser editadas. Somente a empresa pode removê-las do histórico.
 - As tarefas atribuídas aparecem para todos os funcionários do setor responsável, e somente colegas do mesmo setor podem dar ciência ou executá-las. Se outra pessoa do setor executar a tarefa, deve informar o motivo; o histórico identifica separadamente o responsável original e o funcionário que executou.
 - No histórico, o funcionário que executou aparece em coluna própria entre o responsável e a data; o motivo informado por quem executou no lugar de outra pessoa fica nas observações do registro.

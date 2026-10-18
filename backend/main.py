@@ -242,6 +242,7 @@ def initialize_database():
             CREATE TABLE IF NOT EXISTS locations (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                cleaning_type TEXT NOT NULL DEFAULT 'Estrutural',
                 photo TEXT,
                 responsible TEXT NOT NULL,
                 responsible_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
@@ -322,6 +323,9 @@ def initialize_database():
         )
         add_column_if_missing(
             conn, "locations", "responsible_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
+        )
+        add_column_if_missing(
+            conn, "locations", "cleaning_type TEXT NOT NULL DEFAULT 'Estrutural'"
         )
         conn.execute(
             """UPDATE locations
@@ -580,6 +584,7 @@ class SectorInput(BaseModel):
 
 class LocationInput(BaseModel):
     name: Annotated[str, Field(min_length=1, max_length=100)]
+    cleaning_type: Annotated[str, Field(min_length=2, max_length=80)] = "Estrutural"
     photo: str | None = None
     sector: str = ""
     responsible: Annotated[str, Field(min_length=1, max_length=100)]
@@ -590,10 +595,18 @@ class LocationInput(BaseModel):
     )
     schedule_time: Annotated[str, Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")] = "23:59"
 
-    @field_validator("name", "sector", "responsible")
+    @field_validator("name", "cleaning_type", "sector", "responsible")
     @classmethod
     def clean_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("cleaning_type")
+    @classmethod
+    def validate_cleaning_type(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("Informe um tipo de limpeza com pelo menos 2 caracteres.")
+        return cleaned
 
     @field_validator("schedule_days")
     @classmethod
@@ -2025,12 +2038,14 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
         )
         conn.execute(
             """INSERT INTO locations
-                (id, company_id, name, photo, responsible, responsible_user_id, frequency, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (id, company_id, name, cleaning_type, photo, responsible,
+                    responsible_user_id, frequency, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 location_id,
                 session["company_id"],
                 payload.name,
+                payload.cleaning_type,
                 payload.photo,
                 responsible["name"],
                 responsible["id"],
@@ -2073,11 +2088,12 @@ def update_location(
             payload.sector,
         )
         conn.execute(
-            """UPDATE locations SET name = ?, photo = ?, responsible = ?,
+            """UPDATE locations SET name = ?, cleaning_type = ?, photo = ?, responsible = ?,
                     responsible_user_id = ?, frequency = ?
                 WHERE id = ? AND company_id = ?""",
             (
                 payload.name,
+                payload.cleaning_type,
                 payload.photo,
                 responsible["name"],
                 responsible["id"],

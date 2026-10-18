@@ -173,6 +173,15 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .filter-control > svg:last-child { pointer-events: none; }
 .toolbar-filters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .team-filters { justify-content: flex-start; margin: -4px 0 12px; }
+.sector-quick-add { display: grid; flex: 1 0 100%; gap: 8px; padding-top: 11px; border-top: 1px solid var(--line); }
+.sector-quick-add > span { color: #56645b; font-size: 11px; font-weight: 700; }
+.sector-quick-add-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.sector-quick-add-item { display: inline-flex; min-height: 36px; overflow: hidden; align-items: stretch; border: 1px solid #dce5dd; border-radius: 9px; background: #fff; }
+.sector-quick-add-item.selected { border-color: var(--green); background: #f1f7f2; }
+.sector-quick-add-name { padding: 0 10px; border: 0; background: transparent; color: #3d4d42; cursor: pointer; font-size: 11px; font-weight: 600; }
+.sector-quick-add-button { display: grid; width: 36px; place-items: center; border: 0; border-left: 1px solid #dce5dd; background: #edf5ee; color: #285d35; cursor: pointer; }
+.sector-quick-add-button:hover { background: #dceedd; }
+.sector-quick-add-name:focus-visible, .sector-quick-add-button:focus-visible { position: relative; z-index: 1; outline-offset: -3px; }
 .schedule-days-field { display: grid; gap: 9px; margin: 0; padding: 0; border: 0; }
 .schedule-days-field legend { margin-bottom: 9px; color: #5b6878; font-size: 10px; font-weight: 600; }
 .schedule-days { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -180,6 +189,8 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .schedule-days label.selected { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, white); color: var(--green-dark); }
 .schedule-days input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .schedule-days label:has(input:focus-visible) { outline: 3px solid #96b8a5; outline-offset: 2px; }
+.schedule-alternate { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 9px 11px; border: 1px solid #dce5dd; border-radius: 9px; background: #f7faf7; color: #3f4f44; cursor: pointer; font-size: 11px; font-weight: 600; }
+.schedule-alternate input { width: 17px; height: 17px; accent-color: var(--green); }
 .location-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .location-card { overflow: hidden; border: 1px solid #e9edea; border-radius: 14px; background: #fff; animation: rise-in .36s ease both; animation-delay: var(--card-delay, 0ms); transition: transform .2s ease, box-shadow .2s ease; }
 .location-card:hover { transform: translateY(-3px); box-shadow: 0 10px 25px #253c2e10; }
@@ -247,6 +258,13 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .form-field input:not([type="file"]), .form-field select, .form-field textarea { width: 100%; min-height: 39px; padding: 9px 11px; border: 1px solid #e4e9e5; border-radius: 8px; outline: none; background: #fff; color: #45564b; font-size: 11px; transition: border-color .16s ease, box-shadow .16s ease; }
 .form-field input::placeholder, .form-field textarea::placeholder { color: #b1bab4; }
 .form-field input:not([type="file"]):focus, .form-field select:focus, .form-field textarea:focus { border-color: #9bb6a2; box-shadow: 0 0 0 3px #dbe8df75; }
+.field-with-action { display: flex; min-width: 0; gap: 7px; }
+.field-with-action select { min-width: 0; flex: 1; }
+.field-add-button { width: 39px; height: 39px; border: 1px solid #cfded1; background: #edf5ee; color: #285d35; }
+.field-add-button:hover:not(:disabled) { background: #dceedd; color: #214c2c; }
+.inline-type-form { display: flex; gap: 7px; }
+.inline-type-form input { min-width: 0; flex: 1; }
+.inline-type-form .button-secondary { min-height: 39px; padding: 0 10px; font-size: 10px; }
 .form-field textarea { min-height: 74px; resize: vertical; line-height: 1.55; }
 .form-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
 .sector-list { display: grid; gap: 8px; max-height: 320px; overflow: auto; }
@@ -552,12 +570,20 @@ html[data-theme="dark"] .modal-form input,
 html[data-theme="dark"] .modal-form select,
 html[data-theme="dark"] .modal-form textarea,
 html[data-theme="dark"] .filter-control select { border-color: var(--line); background-color: #273244; }
+html[data-theme="dark"] .field-add-button { border-color: var(--line); background: #273b2d; color: #bde5c1; }
+html[data-theme="dark"] .field-add-button:hover:not(:disabled) { background: #31513a; }
 html[data-theme="dark"] .task-meta,
 html[data-theme="dark"] .page-heading p,
 html[data-theme="dark"] .profile-menu-heading span,
 html[data-theme="dark"] .history-table tbody tr:hover,
 html[data-theme="dark"] .notification-item.read { background: #273244; }
 html[data-theme="dark"] .task-reminder { border-color: #554a32; background: #322c21; color: #e0c587; }
+html[data-theme="dark"] .sector-quick-add-item { border-color: var(--line); background: #1f2937; }
+html[data-theme="dark"] .sector-quick-add-item.selected { border-color: var(--green); background: #26364f; }
+html[data-theme="dark"] .sector-quick-add-name,
+html[data-theme="dark"] .sector-quick-add > span { color: #dce5de; }
+html[data-theme="dark"] .sector-quick-add-button { border-color: var(--line); background: #273b2d; color: #bde5c1; }
+html[data-theme="dark"] .sector-quick-add-button:hover { background: #31513a; }
 html[data-theme="dark"] .status-done { background: #293b30; color: #a8cfaf; }
 html[data-theme="dark"] .status-attention { background: #3b3325; color: #dec48d; }
 html[data-theme="dark"] .cleaning-auto-status { border-color: var(--line); background: #273244; color: #dce5de; }
@@ -585,6 +611,7 @@ html[data-theme="dark"] .record-summary small { color: #a0ada4; }
 html[data-theme="dark"] .history-parties > small { color: #a0ada4; }
 html[data-theme="dark"] .schedule-days label { border-color: var(--line); background: #273244; color: #cbd5e1; }
 html[data-theme="dark"] .schedule-days label.selected { border-color: var(--green); background: #26364f; color: #dbeafe; }
+html[data-theme="dark"] .schedule-alternate { border-color: var(--line); background: #273244; color: #dce5de; }
 html[data-theme="dark"] .modal-form input,
 html[data-theme="dark"] .modal-form select,
 html[data-theme="dark"] .modal-form textarea { color-scheme: dark; }

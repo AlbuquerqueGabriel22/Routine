@@ -39,6 +39,14 @@ import {
 } from "lucide-react";
 
 const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
+const SCHEDULE_FREQUENCIES = ["Diário", "Semanal", "Mensal"];
+const MONTH_WEEKS = [
+  { value: "1", label: "1ª semana" },
+  { value: "2", label: "2ª semana" },
+  { value: "3", label: "3ª semana" },
+  { value: "4", label: "4ª semana" },
+  { value: "last", label: "Última semana" },
+];
 const WEEKDAYS = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
 const sameSector = (left, right) => String(left || "").trim().toLocaleLowerCase("pt-BR")
   === String(right || "").trim().toLocaleLowerCase("pt-BR");
@@ -127,7 +135,7 @@ function formatDateTime(value) {
     .format(new Date(value));
 }
 
-function scheduleDescription(scheduleDays, scheduleTime) {
+function scheduleDescription(scheduleDays, scheduleTime, frequency, monthWeek, alternateWeeks) {
   let days = [];
   try {
     days = Array.isArray(scheduleDays) ? scheduleDays : JSON.parse(scheduleDays || "[]");
@@ -135,7 +143,13 @@ function scheduleDescription(scheduleDays, scheduleTime) {
     return "Rotina não configurada";
   }
   const selectedDays = days.map((day) => WEEKDAYS[day]).filter(Boolean).join(", ");
-  return selectedDays ? `${selectedDays} · ${scheduleTime || "23:59"}` : "Rotina não configurada";
+  if (!selectedDays) return "Rotina não configurada";
+  const time = scheduleTime || "23:59";
+  if (frequency === "Mensal") {
+    const weekLabel = MONTH_WEEKS.find((week) => week.value === monthWeek)?.label || "1ª semana";
+    return `${weekLabel} · ${selectedDays} · ${time}`;
+  }
+  return `${selectedDays}${alternateWeeks || frequency === "Quinzenal" ? " · semana sim, semana não" : ""} · ${time}`;
 }
 
 function todayValue() {
@@ -655,6 +669,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
             <LocationsPage
               locations={visibleLocations}
               allLocations={locations}
+              sectors={sectors}
               loading={loading}
               frequency={frequencyFilter}
               setFrequency={setFrequencyFilter}
@@ -664,6 +679,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               setPhoto={setPhotoFilter}
               isBoss={isBoss}
               onAdd={() => setModal({ type: "location" })}
+              onAddToSector={(sector) => setModal({ type: "location", initialSector: sector })}
               onEdit={(item) => setModal({ type: "location", item })}
               onView={(item) => setModal({ type: "location-detail", item })}
               onAddCleaning={(item) => setModal({ type: "cleaning", initial: { location_id: item.id } })}
@@ -729,6 +745,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       {modal?.type === "location" && (
         <LocationForm
           item={modal.item}
+          initialSector={modal.initialSector}
+          locations={locations}
           team={team}
           sectors={sectors}
           saving={saving}
@@ -1147,11 +1165,21 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
     assigned_user_id: item?.assigned_user_id || "",
     deadline: localDeadline,
   });
+  const [sector, setSector] = useState(
+    team.find((member) => member.id === item?.assigned_user_id)?.sector || "",
+  );
+  const sectors = [...new Set(team.map((member) => member.sector).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const sectorTeam = team.filter((member) => member.sector === sector);
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
     if (!team.length) {
       setError("Cadastre um funcionário antes de criar uma tarefa.");
+      return;
+    }
+    if (!sector || !sectorTeam.some((member) => member.id === values.assigned_user_id)) {
+      setError("Selecione o setor e o funcionário responsável.");
       return;
     }
     setError("");
@@ -1173,7 +1201,8 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
       {item
         ? <div className="task-edit-summary"><strong>{item.title}</strong>{item.description && <p>{item.description}</p>}<small>O nome e os detalhes da tarefa não podem ser editados.</small></div>
         : <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>}
-      <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required value={values.assigned_user_id} onChange={(event) => setValues({ ...values, assigned_user_id: event.target.value })}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
+      <div className="form-field"><label htmlFor="task-sector">Setor <span className="required">*</span></label><select id="task-sector" required value={sector} onChange={(event) => { setSector(event.target.value); setValues((current) => ({ ...current, assigned_user_id: "" })); }}><option value="">Selecione um setor</option>{sectors.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+      <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required disabled={!sector} value={values.assigned_user_id} onChange={(event) => setValues((current) => ({ ...current, assigned_user_id: event.target.value }))}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
       <div className="form-field"><label htmlFor="task-deadline">Prazo final — data e hora <span className="required">*</span></label><input id="task-deadline" type="datetime-local" required value={values.deadline} onChange={(event) => setValues({ ...values, deadline: event.target.value })} /><small className="field-hint">O horário será salvo com o fuso local e exibido para a equipe.</small></div>
       {!item && <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>}
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -1695,11 +1724,14 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
   return <article className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tint}`}><Icon size={18} /></span></div><div className="stat-number">{loading ? <span className="skeleton-number" /> : value}</div><div className="stat-hint">{hint}</div></article>;
 }
 
-function LocationsPage({ locations, allLocations, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onEdit, onView, onAddCleaning }) {
+function LocationsPage({ locations, allLocations, sectors, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onAddToSector, onEdit, onView, onAddCleaning }) {
   const [sector, setSector] = useState("");
   const [cleaningType, setCleaningType] = useState("");
   const [itemId, setItemId] = useState("");
-  const sectorOptions = [...new Set(allLocations.map((location) => location.responsible_sector).filter(Boolean))]
+  const sectorOptions = [...new Set([
+    ...sectors.map((item) => item.name),
+    ...allLocations.map((location) => location.responsible_sector),
+  ].filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "pt-BR"));
   const typeOptions = [...new Set(allLocations
     .filter((location) => !sector || sameSector(location.responsible_sector, sector))
@@ -1730,6 +1762,19 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
           <div className="filter-control"><Users size={15} /><select value={responsible} onChange={(event) => setResponsible(event.target.value)} aria-label="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><ImagePlus size={15} /><select value={photo} onChange={(event) => setPhoto(event.target.value)} aria-label="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></select><ChevronDown size={14} /></div>
         </div>
+        {isBoss && sectorOptions.length > 0 && (
+          <div className="sector-quick-add" aria-label="Adicionar item por setor">
+            <span>Adicionar equipamento por setor</span>
+            <div className="sector-quick-add-list">
+              {sectorOptions.map((value) => (
+                <div className={`sector-quick-add-item ${sameSector(sector, value) ? "selected" : ""}`} key={value}>
+                  <button type="button" className="sector-quick-add-name" onClick={() => { setSector(value); setCleaningType(""); setItemId(""); setResponsible(""); }}>{value}</button>
+                  <button type="button" className="sector-quick-add-button" onClick={() => onAddToSector(value)} aria-label={`Adicionar equipamento em ${value}`} title={`Adicionar equipamento em ${value}`}><Plus size={16} /></button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
       {loading && !allLocations.length ? <LoadingState /> : sectorLocations.length ? (
         <section className="location-grid">
@@ -1744,7 +1789,7 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
               </div>
               <div className="location-card-body">
                 <button className="location-name-button" onClick={() => onView(location)}><h3>{location.name}</h3><ArrowUpRight size={16} /></button>
-                <div className="location-meta"><span><Filter size={14} />{location.cleaning_type || "Estrutural"}</span><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time)}</span></div>
+                <div className="location-meta"><span><Filter size={14} />{location.cleaning_type || "Estrutural"}</span><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time, location.frequency, location.month_week, location.alternate_weeks)}</span></div>
                 <div className="location-card-bottom"><span>{location.cleaning_count === 1 ? "1 registro" : `${location.cleaning_count || 0} registros`} · {formatDate(location.last_cleaned)}</span><button className="text-button compact" onClick={() => onAddCleaning(location)}><Plus size={14} /> Registrar</button></div>
               </div>
             </article>
@@ -1958,7 +2003,7 @@ function ImageField({ label, value, onChange, allowCamera = false, disabled = fa
   </label>{uploadError && <span className="field-error">{uploadError}</span>}</div>;
 }
 
-function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }) {
+function LocationForm({ item, initialSector = "", locations, team, sectors, saving, onClose, onSave, onDelete }) {
   const [values, setValues] = useState(() => {
     let scheduleDays = [0, 1, 2, 3, 4, 5];
     try {
@@ -1971,17 +2016,55 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
       cleaning_type: item?.cleaning_type || "Estrutural",
       responsible: item?.responsible || "",
       responsible_user_id: item?.responsible_user_id || "",
-      frequency: item?.frequency || "",
+      frequency: item?.frequency === "Quinzenal" ? "Semanal" : item?.frequency || "Diário",
       photo: item?.photo || "",
       schedule_days: scheduleDays,
       schedule_time: item?.schedule_time || "23:59",
+      month_week: item?.month_week || "1",
+      alternate_weeks: Boolean(item?.alternate_weeks) || item?.frequency === "Quinzenal",
     };
   });
-  const [sector, setSector] = useState(item?.responsible_sector || team.find((member) =>
+  const [sector, setSector] = useState(item?.responsible_sector || initialSector || team.find((member) =>
     member.id === item?.responsible_user_id || member.name === item?.responsible)?.sector || "");
+  const [customCleaningTypes, setCustomCleaningTypes] = useState([]);
+  const [addingCleaningType, setAddingCleaningType] = useState(false);
+  const [newCleaningType, setNewCleaningType] = useState("");
   const sectorTeam = team.filter((member) => Boolean(sector) && member.sector === sector);
+  const cleaningTypeOptions = [...new Set([
+    "Estrutural",
+    ...locations
+      .filter((location) => sameSector(location.responsible_sector, sector))
+      .map((location) => location.cleaning_type || "Estrutural"),
+    ...customCleaningTypes.filter((type) => type.sector === sector).map((type) => type.name),
+    ...(item && sameSector(item.responsible_sector, sector) ? [values.cleaning_type] : []),
+  ])].sort((left, right) => left.localeCompare(right, "pt-BR"));
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
+  function changeSector(value) {
+    setSector(value);
+    setValues((current) => ({
+      ...current,
+      responsible_user_id: "",
+      cleaning_type: "Estrutural",
+    }));
+    setAddingCleaningType(false);
+    setNewCleaningType("");
+  }
+  function addCleaningType(event) {
+    event.preventDefault();
+    const name = newCleaningType.trim();
+    if (name.length < 2) {
+      setError("Informe um tipo de limpeza com pelo menos 2 caracteres.");
+      return;
+    }
+    const existingType = cleaningTypeOptions.find((type) => type.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"));
+    const selectedType = existingType || name;
+    if (!existingType) setCustomCleaningTypes((current) => [...current, { sector, name }]);
+    change("cleaning_type", selectedType);
+    setNewCleaningType("");
+    setAddingCleaningType(false);
+    setError("");
+  }
   function toggleDay(day) {
     setValues((current) => ({
       ...current,
@@ -1993,8 +2076,9 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
   async function submit(event) {
     event.preventDefault();
     const responsible = sectorTeam.find((member) => member.id === values.responsible_user_id);
-    if (!values.name.trim() || !values.cleaning_type.trim() || !responsible || !values.schedule_days.length) {
-      setError("Preencha o item, o tipo de limpeza, o responsável e ao menos um dia da rotina.");
+    if (!values.name.trim() || !values.cleaning_type.trim() || !responsible || !values.schedule_days.length
+      || !SCHEDULE_FREQUENCIES.includes(values.frequency)) {
+      setError("Preencha o item, o tipo de limpeza, o responsável, a frequência e ao menos um dia da rotina.");
       return;
     }
     setError("");
@@ -2004,21 +2088,25 @@ function LocationForm({ item, team, sectors, saving, onClose, onSave, onDelete }
       cleaning_type: values.cleaning_type.trim(),
       sector,
       responsible: responsible.name,
-      frequency: values.schedule_days.length === 7 ? "Diário" : "Semanal",
+      alternate_weeks: values.frequency === "Semanal" && values.alternate_weeks,
     }, item?.id);
   }
   return <Modal title={item ? "Editar item de limpeza" : "Novo item de limpeza"} subtitle="CADASTRO DE ITEM" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} allowCamera />
       <div className="form-row">
-        <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => { setSector(event.target.value); change("responsible_user_id", ""); }}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><input id="location-cleaning-type" required minLength={2} maxLength={80} placeholder="Ex.: Estrutural" value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)} /></div>
+        <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => changeSector(event.target.value)}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><div className="field-with-action"><select id="location-cleaning-type" required disabled={!sector} value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)}><option value="">Selecione um tipo</option>{cleaningTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}</select><button type="button" className="icon-button field-add-button" disabled={!sector} onClick={() => { setAddingCleaningType((current) => !current); setError(""); }} aria-label="Adicionar tipo de limpeza" title="Adicionar tipo de limpeza"><Plus size={17} /></button></div>{addingCleaningType && <div className="inline-type-form"><input aria-label="Novo tipo de limpeza" minLength={2} maxLength={80} placeholder="Ex.: Terminal, profunda" value={newCleaningType} onChange={(event) => setNewCleaningType(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addCleaningType(event); }} /><button type="button" className="button-secondary" disabled={newCleaningType.trim().length < 2} onClick={addCleaningType}><Plus size={15} />Adicionar tipo</button></div>}<small className="field-hint">Os tipos disponíveis acompanham o setor selecionado.</small></div>
       </div>
       <div className="form-field"><label htmlFor="location-name">A ser limpo <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Chão, paredes, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
+      <div className="form-field"><label htmlFor="location-frequency">Frequência da rotina <span className="required">*</span></label><select id="location-frequency" required value={values.frequency} onChange={(event) => change("frequency", event.target.value)}>{SCHEDULE_FREQUENCIES.map((frequency) => <option key={frequency} value={frequency}>{frequency}</option>)}</select></div>
+      {values.frequency === "Mensal" && <div className="form-field"><label htmlFor="location-month-week">Semana do mês <span className="required">*</span></label><select id="location-month-week" required value={values.month_week} onChange={(event) => change("month_week", event.target.value)}>{MONTH_WEEKS.map((week) => <option key={week.value} value={week.value}>{week.label}</option>)}</select><small className="field-hint">Ex.: selecione “Última semana” e “Qui” para executar na última quinta-feira de cada mês.</small></div>}
+      {values.frequency === "Semanal" && <label className="schedule-alternate"><input type="checkbox" checked={values.alternate_weeks} onChange={(event) => change("alternate_weeks", event.target.checked)} /><span>Executar semana sim, semana não</span></label>}
       <fieldset className="schedule-days-field">
-        <legend>Dias da rotina <span className="required">*</span></legend>
+        <legend>{values.frequency === "Mensal" ? "Dias da semana nessa semana do mês" : "Dias da rotina"} <span className="required">*</span></legend>
         <div className="schedule-days">{WEEKDAYS.map((label, day) => <label className={values.schedule_days.includes(day) ? "selected" : ""} key={label}><input type="checkbox" checked={values.schedule_days.includes(day)} onChange={() => toggleDay(day)} /><span>{label}</span></label>)}</div>
+        {values.frequency === "Diário" && <small className="field-hint">Selecione os dias em que o serviço deve ser feito. A rotina será criada nesses dias, toda semana.</small>}
       </fieldset>
       <div className="form-field"><label htmlFor="location-schedule-time">Horário limite <span className="required">*</span></label><input id="location-schedule-time" type="time" required value={values.schedule_time} onChange={(event) => change("schedule_time", event.target.value)} /><small className="field-hint">A tarefa será criada automaticamente para cada dia selecionado. Se não for concluída até esse horário, irá para o histórico como “Não feito”.</small></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -2113,7 +2201,7 @@ function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, 
   return <Modal title={item.name} subtitle="DETALHES DO ITEM DE LIMPEZA" onClose={onClose} wide>
     <div className="location-detail-content">
       {item.photo && <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />}
-      <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
+      <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time, item.frequency, item.month_week, item.alternate_weeks)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
       <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
       {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
       <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar item</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>

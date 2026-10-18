@@ -272,6 +272,9 @@ def initialize_database():
                 assigned_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 weekdays TEXT NOT NULL,
                 due_time TEXT NOT NULL,
+                month_week TEXT NOT NULL DEFAULT '1',
+                alternate_weeks INTEGER NOT NULL DEFAULT 0,
+                anchor_date TEXT,
                 last_generated_on TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
@@ -331,6 +334,19 @@ def initialize_database():
         )
         add_column_if_missing(
             conn, "locations", "cleaning_type TEXT NOT NULL DEFAULT 'Estrutural'"
+        )
+        add_column_if_missing(conn, "task_schedules", "month_week TEXT NOT NULL DEFAULT '1'")
+        add_column_if_missing(conn, "task_schedules", "alternate_weeks INTEGER NOT NULL DEFAULT 0")
+        add_column_if_missing(conn, "task_schedules", "anchor_date TEXT")
+        conn.execute(
+            """UPDATE task_schedules SET anchor_date = last_generated_on
+                WHERE anchor_date IS NULL"""
+        )
+        conn.execute(
+            """UPDATE task_schedules SET alternate_weeks = 1
+                WHERE location_id IN (
+                    SELECT id FROM locations WHERE frequency = 'Quinzenal'
+                )"""
         )
         conn.execute(
             """UPDATE locations
@@ -426,13 +442,35 @@ def initialize_database():
 initialize_database()
 
 
+def schedule_occurs_on(
+    occurrence_day: date,
+    weekdays: set[int],
+    frequency: str,
+    month_week: str,
+    alternate_weeks: bool,
+    anchor_date: str | None,
+) -> bool:
+    if occurrence_day.weekday() not in weekdays:
+        return False
+    if frequency == "Mensal":
+        if month_week == "last":
+            return (occurrence_day + timedelta(days=7)).month != occurrence_day.month
+        return (occurrence_day.day - 1) // 7 + 1 == int(month_week)
+    if alternate_weeks:
+        anchor = date.fromisoformat(anchor_date) if anchor_date else occurrence_day
+        anchor_monday = anchor - timedelta(days=anchor.weekday())
+        occurrence_monday = occurrence_day - timedelta(days=occurrence_day.weekday())
+        return ((occurrence_monday - anchor_monday).days // 7) % 2 == 0
+    return frequency in {"Diário", "Semanal", "Quinzenal"}
+
+
 def process_due_tasks(now: datetime | None = None):
     current = now or datetime.now(timezone.utc)
     local_today = current.astimezone(SCHEDULE_TIMEZONE).date()
     generation_end = local_today + timedelta(days=6)
     with connection() as conn:
         schedules = conn.execute(
-            """SELECT s.*, l.name AS location_name
+            """SELECT s.*, l.name AS location_name, l.frequency
                 FROM task_schedules s
                 JOIN locations l ON l.id = s.location_id"""
         ).fetchall()
@@ -442,7 +480,14 @@ def process_due_tasks(now: datetime | None = None):
             scheduled_time = time.fromisoformat(schedule["due_time"])
             occurrence_day = start
             while occurrence_day <= generation_end:
-                if occurrence_day.weekday() in weekdays:
+                if schedule_occurs_on(
+                    occurrence_day,
+                    weekdays,
+                    schedule["frequency"],
+                    schedule["month_week"],
+                    bool(schedule["alternate_weeks"]) or schedule["frequency"] == "Quinzenal",
+                    schedule["anchor_date"],
+                ):
                     deadline_local = datetime.combine(
                         occurrence_day, scheduled_time, tzinfo=SCHEDULE_TIMEZONE
                     )
@@ -623,6 +668,8 @@ class LocationInput(BaseModel):
         default_factory=lambda: list(range(6))
     )
     schedule_time: Annotated[str, Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")] = "23:59"
+    month_week: str = "1"
+    alternate_weeks: bool = False
 
     @field_validator("name", "cleaning_type", "sector", "responsible")
     @classmethod
@@ -651,6 +698,13 @@ class LocationInput(BaseModel):
             time.fromisoformat(value)
         except ValueError as error:
             raise ValueError("Informe um horário válido no formato 24 horas.") from error
+        return value
+
+    @field_validator("month_week")
+    @classmethod
+    def validate_month_week(cls, value: str) -> str:
+        if value not in {"1", "2", "3", "4", "last"}:
+            raise ValueError("Selecione uma semana válida do mês.")
         return value
 
 
@@ -930,7 +984,8 @@ def fetch_location(conn: sqlite3.Connection, location_id: str, company_id: str):
     row = conn.execute(
         """SELECT l.*, u.sector AS responsible_sector,
                 s.id AS schedule_id, s.weekdays AS schedule_days,
-                s.due_time AS schedule_time
+                s.due_time AS schedule_time, s.month_week,
+                s.alternate_weeks, s.anchor_date
             FROM locations l
             LEFT JOIN users u ON u.id = l.responsible_user_id
             LEFT JOIN task_schedules s ON s.location_id = l.id
@@ -950,12 +1005,23 @@ def save_location_schedule(
     location_name: str,
     weekdays: list[int],
     due_time: str,
+    frequency: str,
+    month_week: str,
+    alternate_weeks: bool,
 ):
     today = datetime.now(SCHEDULE_TIMEZONE).date()
     existing = conn.execute(
-        "SELECT id FROM task_schedules WHERE location_id = ? AND company_id = ?",
+        """SELECT id, alternate_weeks, anchor_date FROM task_schedules
+            WHERE location_id = ? AND company_id = ?""",
         (location_id, company_id),
     ).fetchone()
+    anchor_date = existing["anchor_date"] if existing is not None else None
+    if alternate_weeks and (
+        existing is None or not bool(existing["alternate_weeks"]) or not anchor_date
+    ):
+        anchor_date = (today - timedelta(days=today.weekday())).isoformat()
+    elif not anchor_date:
+        anchor_date = today.isoformat()
     if existing is not None:
         current_utc = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for task in conn.execute(
@@ -965,7 +1031,14 @@ def save_location_schedule(
             (existing["id"], current_utc),
         ).fetchall():
             occurrence_day = date.fromisoformat(task["scheduled_for"])
-            if occurrence_day.weekday() not in weekdays:
+            if not schedule_occurs_on(
+                occurrence_day,
+                set(weekdays),
+                frequency,
+                month_week,
+                alternate_weeks,
+                anchor_date,
+            ):
                 conn.execute("DELETE FROM tasks WHERE id = ?", (task["id"],))
                 continue
             deadline = datetime.combine(
@@ -987,13 +1060,16 @@ def save_location_schedule(
     conn.execute(
         """INSERT INTO task_schedules
             (id, company_id, location_id, assigned_user_id, weekdays, due_time,
-                last_generated_on, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                month_week, alternate_weeks, anchor_date, last_generated_on, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(location_id) DO UPDATE SET
                 company_id = excluded.company_id,
                 assigned_user_id = excluded.assigned_user_id,
                 weekdays = excluded.weekdays,
                 due_time = excluded.due_time,
+                month_week = excluded.month_week,
+                alternate_weeks = excluded.alternate_weeks,
+                anchor_date = excluded.anchor_date,
                 last_generated_on = excluded.last_generated_on""",
         (
             str(uuid.uuid4()),
@@ -1002,6 +1078,9 @@ def save_location_schedule(
             responsible_user_id,
             json.dumps(weekdays),
             due_time,
+            month_week,
+            alternate_weeks,
+            anchor_date,
             (today - timedelta(days=1)).isoformat(),
             datetime.now(timezone.utc).isoformat(timespec="seconds"),
         ),
@@ -2136,7 +2215,8 @@ def list_locations(
             f"""
             SELECT l.*, owner.sector AS responsible_sector,
                 schedule.id AS schedule_id, schedule.weekdays AS schedule_days,
-                schedule.due_time AS schedule_time,
+                schedule.due_time AS schedule_time, schedule.month_week,
+                schedule.alternate_weeks, schedule.anchor_date,
                 (SELECT COUNT(*) FROM cleanings c WHERE c.location_id = l.id) AS cleaning_count,
                 (SELECT c.cleaning_date FROM cleanings c WHERE c.location_id = l.id
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_cleaned,
@@ -2190,6 +2270,9 @@ def create_location(payload: LocationInput, session: dict = Depends(company_only
             payload.name,
             payload.schedule_days,
             payload.schedule_time,
+            payload.frequency,
+            payload.month_week,
+            payload.alternate_weeks,
         )
         return fetch_location(conn, location_id, session["company_id"])
 
@@ -2239,6 +2322,9 @@ def update_location(
             payload.name,
             payload.schedule_days,
             payload.schedule_time,
+            payload.frequency,
+            payload.month_week,
+            payload.alternate_weeks,
         )
         return fetch_location(conn, location_id, session["company_id"])
 

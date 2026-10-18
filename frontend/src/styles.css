@@ -814,3 +814,12 @@ html[data-theme="dark"] .modal-form textarea { color-scheme: dark; }
   .history-table td::before { flex-basis: 86px; }
   .global-search { width: 35vw; }
 }
+
+@media (max-width: 600px) {
+  .global-search input,
+  .auth-form input,
+  .form-field input:not([type="file"]),
+  .form-field select,
+  .form-field textarea,
+  .toolbar-filters .filter-control select { font-size: 16px; }
+}

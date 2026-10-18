@@ -2288,6 +2288,7 @@ def list_history(
         rows = conn.execute(
             f"""
             SELECT c.*, l.name AS location_name, l.responsible,
+                l.cleaning_type AS cleaning_type,
                 owner.sector AS responsible_sector,
                 COALESCE(u.name, co.fantasy_name) AS created_by_name,
                 u.name AS executor_name,
@@ -2349,6 +2350,7 @@ def list_history(
                     COALESCE(t.completed_at, t.missed_at) AS created_at,
                     COALESCE(t.completed_at, t.missed_at) AS event_at,
                     t.title AS location_name, t.deadline AS deadline,
+                    COALESCE(cleaning_location.cleaning_type, '') AS cleaning_type,
                     assigned.name AS responsible, assigned.sector AS assignee_sector,
                     assigned.sector AS responsible_sector,
                     executor.name AS executor_name,
@@ -2356,6 +2358,7 @@ def list_history(
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
                 LEFT JOIN task_schedules schedule ON schedule.id = t.schedule_id
+                LEFT JOIN locations cleaning_location ON cleaning_location.id = schedule.location_id
                 LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(task_clauses)}
                 ORDER BY COALESCE(t.completed_at, t.missed_at) DESC""",

@@ -23,7 +23,7 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. Só após o envio das duas fotos a tarefa passa para “Feito” e aparece como concluída no histórico.
 - Cada conta pode escolher entre os temas claro e escuro nas configurações do perfil.
 - Histórico de atividades com data, status, observações e fotos antes/depois. Os registros não possuem operação de edição.
-- O histórico permite filtrar tarefas concluídas e não realizadas e informa setor, responsável, executor e data/hora.
+- O histórico permite filtrar setor, tipo de limpeza, item a ser limpo e status (“Feito” ou “Não feito”), além de informar responsável, executor e data/hora.
 - Fotos protegidas por sessão e escopo da empresa/conta.
 - Layout responsivo e instalação como aplicativo pelo navegador compatível.
 

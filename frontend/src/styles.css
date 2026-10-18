@@ -199,6 +199,8 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 .location-card-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 14px; padding-top: 11px; border-top: 1px solid #f0f2f0; color: #a1aaa5; font-size: 9px; }
 .text-button.compact { gap: 4px; padding: 3px 0; font-size: 9px; }
 .history-panel { overflow: hidden; }
+.history-toolbar { flex-wrap: wrap; justify-content: flex-start; }
+.history-filters { display: grid; flex: 1; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 8px; }
 .table-scroll { overflow-x: auto; }
 .history-table { width: 100%; border-collapse: collapse; text-align: left; }
 .history-table th { height: 44px; padding: 0 16px; border-bottom: 1px solid #edf0ed; background: #fbfcfb; color: #9ba59f; font-size: 8px; font-weight: 700; letter-spacing: .9px; white-space: nowrap; }
@@ -324,6 +326,8 @@ kbd { flex: 0 0 auto; padding: 3px 5px; border: 1px solid #e8ece8; border-radius
 @media (max-width: 820px) {
   .cleaning-toolbar { flex-wrap: wrap; justify-content: flex-start; padding: 12px; }
   .cleaning-filters { width: 100%; justify-content: flex-start; }
+  .history-toolbar { padding: 12px; }
+  .history-filters { width: 100%; }
 }
 
 @media (max-width: 600px) {

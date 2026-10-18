@@ -362,8 +362,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const visibleHistory = useMemo(() => history.filter((entry) => {
     const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.executor_name || ""} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
     const matchesStatus = !statusFilter
-      || (statusFilter === "Concluída" && ["Concluída", "Limpo"].includes(entry.status))
-      || entry.status === statusFilter;
+      || (statusFilter === "Feito" && ["Concluída", "Limpo"].includes(entry.status))
+      || (statusFilter === "Não feito" && ["Não feito", "Não limpo"].includes(entry.status));
     return matchesQuery && matchesStatus;
   }), [history, query, statusFilter]);
 
@@ -1760,15 +1760,34 @@ function LocationsPage({ locations, allLocations, loading, frequency, setFrequen
 
 function HistoryPage({ entries, locations, sectors, isBoss, loading, status, setStatus, onAdd, onView }) {
   const [sector, setSector] = useState("");
-  const filteredEntries = entries.filter((entry) => !isBoss || !sector || sameSector(entry.responsible_sector, sector));
+  const [cleaningType, setCleaningType] = useState("");
+  const [locationId, setLocationId] = useState("");
+  const sectorOptions = [...new Set([
+    ...locations.map((location) => location.responsible_sector),
+    ...sectors.map((item) => item.name),
+    ...entries.map((entry) => entry.responsible_sector),
+  ].filter(Boolean))].sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = [...new Set(locations
+    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
+    .map((location) => location.cleaning_type || "Estrutural"))]
+    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const itemOptions = locations.filter((location) =>
+    (!sector || sameSector(location.responsible_sector, sector))
+      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
+  const filteredEntries = entries.filter((entry) =>
+    (!sector || sameSector(entry.responsible_sector, sector))
+      && (!cleaningType || (entry.cleaning_type || "Estrutural") === cleaningType)
+      && (!locationId || entry.location_id === locationId));
   return (
     <>
       <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." action={<button className="button-primary" onClick={onAdd} disabled={!locations.length}><Plus size={17} /> Registrar limpeza</button>} />
-      <div className="toolbar panel">
+      <div className="toolbar panel history-toolbar">
         <div className="toolbar-copy"><span className="result-count">{filteredEntries.length}</span><span>{filteredEntries.length === 1 ? "registro" : "registros"}</span></div>
-        <div className="toolbar-filters">
-          {isBoss && <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>}
-          <div className="filter-control"><Filter size={16} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar por status"><option value="">Todos</option><option value="Concluída">Concluídas</option><option value="Não feito">Não feitas</option></select><ChevronDown size={14} /></div>
+        <div className="toolbar-filters cleaning-filters history-filters">
+          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); setLocationId(""); }} aria-label="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectorOptions.map((item) => <option key={item} value={item}>{item}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Filter size={15} /><select value={cleaningType} disabled={!sector} onChange={(event) => { setCleaningType(event.target.value); setLocationId(""); }} aria-label="Filtrar histórico por tipo de limpeza"><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><Leaf size={15} /><select value={locationId} disabled={!cleaningType} onChange={(event) => setLocationId(event.target.value)} aria-label="Filtrar histórico por item a ser limpo"><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select><ChevronDown size={14} /></div>
+          <div className="filter-control"><CheckCircle2 size={15} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar histórico por status"><option value="">Todos os status</option><option value="Feito">Feito</option><option value="Não feito">Não feito</option></select><ChevronDown size={14} /></div>
         </div>
       </div>
       <section className="panel history-panel">

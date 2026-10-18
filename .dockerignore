@@ -15,3 +15,5 @@ backend/uploads/*
 backend/build
 backend/dist
 release
+
+docker-compose.yml

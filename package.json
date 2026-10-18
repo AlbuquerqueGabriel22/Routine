@@ -1,8 +1,8 @@
 {
   "name": "routiner-desktop",
-  "version": "2.12.0",
+  "version": "4.5.0",
   "private": true,
-  "description": "Aplicativo desktop Routiner para Windows",
+  "description": "Aplicativo desktop Routine 4.5 para Windows",
   "main": "desktop/main.cjs",
   "scripts": {
     "build:web": "npm --prefix frontend run build",
@@ -21,7 +21,7 @@
   },
   "build": {
     "appId": "br.com.routiner.desktop",
-    "productName": "Routiner",
+    "productName": "Routine 4.5",
     "asar": true,
     "directories": {
       "output": "release"
@@ -50,7 +50,7 @@
         }
       ],
       "icon": "desktop/routiner.ico",
-      "artifactName": "Routiner-Setup-${version}.${ext}"
+      "artifactName": "Routine-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -58,7 +58,7 @@
       "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Routiner"
+      "shortcutName": "Routine 4.5"
     }
   },
   "allowScripts": {

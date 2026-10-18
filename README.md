@@ -7,16 +7,18 @@ Aplicativo web instalável para organizar locais, equipes e registros de limpeza
 - Cadastro de empresas com nome fantasia, identificador, e-mail e senha.
 - Cadastro de funcionários pela empresa, com setor, identificador e senha.
 - No primeiro acesso de um funcionário recém-cadastrado, o app pergunta se ele quer trocar a senha inicial ou mantê-la. A nova senha é salva na conta; a escolha é lembrada nos próximos acessos.
-- Cadastro e organização de setores por empresa; filtros de locais, tarefas e histórico são preenchidos pelos setores cadastrados e acompanham os novos setores. Funcionários e responsáveis de locais são vinculados a um setor. A empresa pode editar o nome/setor de funcionários e alterar os dados, o prazo e o responsável das demandas pendentes.
+- Cadastro e organização de setores por empresa; filtros de locais, tarefas e histórico são preenchidos pelos setores cadastrados e acompanham os novos setores. Funcionários e responsáveis de locais são vinculados a um setor. A empresa pode editar o nome/setor de funcionários e, nas tarefas pendentes, alterar somente o funcionário responsável e o prazo.
 - Na aba **Limpeza**, a empresa cadastra cada item a ser limpo, seu setor, tipo de limpeza e rotina. Os filtros de setor, tipo e item são liberados em sequência; o tipo inicial é “Estrutural” e pode ser personalizado pela empresa.
 - No cadastro e na edição de itens de limpeza, a foto pode ser selecionada da galeria ou capturada na hora pela câmera.
 - Login da empresa no formato `empresa.routine` e do funcionário no formato `usuario.empresa.routine`.
 - Visão separada por empresa e setor: a empresa vê todos os setores; cada funcionário consulta os locais e o histórico vinculados a responsáveis do próprio setor. Os locais devem ser associados a um funcionário cadastrado do setor selecionado.
 - Cada item de limpeza pode ter uma rotina automática: escolha setor, tipo de limpeza, item, responsável, dias da semana e horário limite. Uma tarefa é criada para cada ocorrência programada e fica disponível para o setor do responsável; na aba **Tarefas** aparecem somente as ocorrências previstas para o dia atual.
-- Tarefas que não forem concluídas até o prazo passam automaticamente ao histórico como “Não feito” e não podem ser editadas. Somente a empresa pode removê-las do histórico.
+- Tarefas que não forem concluídas até o prazo passam automaticamente ao histórico como “Não feito” e não podem ser editadas. A exclusão administrativa exige um motivo e mantém o registro no arquivo de exclusões.
+- Quando uma tarefa vence, o funcionário responsável recebe uma janela obrigatória com a tarefa, setor, prazo e descrição. Para fechá-la, precisa registrar uma observação confirmando a ciência; a resposta e o horário ficam no histórico.
 - As tarefas atribuídas aparecem para todos os funcionários do setor responsável, e somente colegas do mesmo setor podem dar ciência ou executá-las. Se outra pessoa do setor executar a tarefa, deve informar o motivo; o histórico identifica separadamente o responsável original e o funcionário que executou.
 - No histórico, o funcionário que executou aparece em coluna própria entre o responsável e a data; o motivo informado por quem executou no lugar de outra pessoa fica nas observações do registro.
 - Tarefas com prazo: a empresa atribui a um funcionário e define data e hora; o funcionário confirma ciência e pode registrar a conclusão.
+- Somente a empresa pode excluir tarefas pendentes ou vencidas; a exclusão exige um motivo e fica disponível no histórico administrativo de exclusões.
 - Alertas visuais de prazo ficam mais urgentes conforme a data se aproxima. A empresa recebe no sino os registros de ciência e conclusão, com funcionário, setor, tarefa e prazo.
 - O funcionário conclui a tarefa pelo botão “Fazer tarefa”, capturando obrigatoriamente as fotos de antes e depois diretamente pela câmera; as imagens não podem ser escolhidas da galeria nem editadas. As conclusões aparecem no histórico.
 - Cada conta pode escolher tema claro, escuro, seguir o sistema ou personalizar a cor de destaque nas configurações do perfil.

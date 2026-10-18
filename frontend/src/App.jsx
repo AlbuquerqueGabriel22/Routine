@@ -256,6 +256,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     account.role === "user" && Boolean(account.initial_password_pending),
   );
   const isBoss = account.role === "company";
+  const overdueTaskAwaitingResponse = !isBoss
+    ? tasks.find((task) => task.assigned_user_id === account.account_id
+      && task.missed_at && !task.missed_acknowledged_at) || null
+    : null;
 
   useEffect(() => {
     const root = document.documentElement;
@@ -314,6 +318,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       && !task.acknowledged_at && !task.completed_at && !task.missed_at) || null;
     setAcknowledgmentTask((current) => current?.id === pending?.id ? current : pending);
   }, [isBoss, tasks, taskNow]);
+
+  useEffect(() => {
+    if (overdueTaskAwaitingResponse) setModal(null);
+  }, [overdueTaskAwaitingResponse?.id]);
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
@@ -429,6 +437,27 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }
 
+  async function acknowledgeMissedTask(task, notes) {
+    setSaving(true);
+    try {
+      const result = await api(`/tasks/${task.id}/missed-acknowledge`, {
+        method: "POST",
+        body: JSON.stringify({ notes }),
+      });
+      setTasks((current) => current.map((item) => item.id === task.id
+        ? {
+          ...item,
+          missed_notes: result.missed_notes,
+          missed_acknowledged_at: result.missed_acknowledged_at,
+        }
+        : item));
+      setToast("Resposta registrada.");
+      await refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
+
   async function completeTask(task, completion) {
     setSaving(true);
     try {
@@ -484,15 +513,12 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const unreadNotifications = notifications.filter((item) => !item.read_at).length;
 
   async function removeItem(kind, id) {
-    const label = kind === "locations"
-      ? "este local e todo o histórico relacionado"
-      : kind === "missed-task" ? "esta tarefa vencida do histórico" : "este registro";
+    const label = kind === "locations" ? "este local e todo o histórico relacionado" : "este registro";
     if (!window.confirm(`Tem certeza de que deseja excluir ${label}? Esta ação não pode ser desfeita.`)) return;
     try {
-      const path = kind === "missed-task" ? `/tasks/${id}/missed` : `/${kind}/${id}`;
-      await api(path, { method: "DELETE" });
+      await api(`/${kind}/${id}`, { method: "DELETE" });
       setModal(null);
-      setToast(kind === "locations" ? "Local excluído." : kind === "missed-task" ? "Tarefa removida do histórico." : "Registro excluído.");
+      setToast(kind === "locations" ? "Local excluído." : "Registro excluído.");
       await refresh();
     } catch (error) {
       setToast(error.message);
@@ -673,6 +699,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               now={taskNow}
               onCreate={() => setModal({ type: "task" })}
               onEdit={(task) => setModal({ type: "task", item: task })}
+              onDelete={(task) => setModal({ type: "task-delete", item: task })}
+              onDeletionHistory={() => setModal({ type: "task-deletions" })}
               onComplete={(task) => setModal({ type: "task-execution", item: task })}
             />
           )}
@@ -698,7 +726,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onComplete={() => setPasswordPromptPending(false)}
         />
       )}
-      {acknowledgmentTask && !isBoss && !passwordPromptPending && (
+      {acknowledgmentTask && !isBoss && !passwordPromptPending && !overdueTaskAwaitingResponse && (
         <AcknowledgmentDialog
           task={acknowledgmentTask}
           now={taskNow}
@@ -735,6 +763,35 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onClose={() => setModal(null)}
           onSave={saveTask}
         />
+      )}
+      {modal?.type === "task-delete" && (
+        <TaskDeleteForm
+          task={modal.item}
+          saving={saving}
+          onClose={() => setModal(null)}
+          onDelete={async (reason) => {
+            setSaving(true);
+            try {
+              const deletionPath = modal.item.missed_at
+                ? `/tasks/${modal.item.id}/missed`
+                : `/tasks/${modal.item.id}`;
+              await api(deletionPath, {
+                method: "DELETE",
+                body: JSON.stringify({ reason }),
+              });
+              setModal(null);
+              setToast("Tarefa excluída e registrada no histórico.");
+              await refresh();
+            } catch (error) {
+              throw error;
+            } finally {
+              setSaving(false);
+            }
+          }}
+        />
+      )}
+      {modal?.type === "task-deletions" && (
+        <TaskDeletionHistory onClose={() => setModal(null)} />
       )}
       {modal?.type === "task-execution" && (
         <TaskExecutionForm
@@ -826,10 +883,22 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           item={modal.item}
           isBoss={isBoss}
           onClose={() => setModal(null)}
-          onDelete={() => removeItem(
-            modal.item.record_type === "task" ? "missed-task" : "history",
-            modal.item.record_type === "task" ? modal.item.task_id : modal.item.id,
-          )}
+          onDelete={() => {
+            if (modal.item.record_type === "task") {
+              setModal({
+                type: "task-delete",
+                item: {
+                  id: modal.item.task_id,
+                  title: modal.item.location_name,
+                  deadline: modal.item.deadline,
+                  missed_at: modal.item.missed_at,
+                  assignee_name: modal.item.responsible,
+                },
+              });
+              return;
+            }
+            removeItem("history", modal.item.id);
+          }}
         />
       )}
       {modal?.type === "location-detail" && (
@@ -841,6 +910,13 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           isBoss={isBoss}
           onRegister={() => setModal({ type: "cleaning", initial: { location_id: modal.item.id } })}
           onRecord={(record) => setModal({ type: "record", item: record })}
+        />
+      )}
+      {overdueTaskAwaitingResponse && !passwordPromptPending && (
+        <MissedTaskAcknowledgmentDialog
+          task={overdueTaskAwaitingResponse}
+          saving={saving}
+          onAcknowledge={(notes) => acknowledgeMissedTask(overdueTaskAwaitingResponse, notes)}
         />
       )}
     </div>
@@ -1013,7 +1089,7 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
   );
 }
 
-function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onComplete }) {
+function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onDelete, onDeletionHistory, onComplete }) {
   const [sector, setSector] = useState("");
   const sectorTasks = tasks.filter((task) => isTaskForToday(task, now)
     && (!isBoss || !sector || sameSector(task.assignee_sector, sector)));
@@ -1027,7 +1103,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
         description={isBoss
           ? "Acompanhe as tarefas previstas para hoje, a ciência da equipe e as conclusões."
           : "Veja as tarefas previstas para hoje no seu setor e registre as execuções."}
-        action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>}
+        action={isBoss && <div className="heading-actions"><button className="button-secondary" onClick={onDeletionHistory}><Trash2 size={16} /> Exclusões</button><button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button></div>}
       />
       {isBoss && <div className="toolbar panel"><div className="toolbar-copy"><span className="result-count">{sectorTasks.length}</span><span>{sectorTasks.length === 1 ? "tarefa" : "tarefas"}</span></div><div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div></div>}
       {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) && (
@@ -1057,7 +1133,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onC
                       <Check size={16} /> Fazer tarefa
                     </button>
                   )}
-                  {isBoss && <button className="button-secondary task-complete" onClick={() => onEdit(task)}><Pencil size={15} /> Editar demanda</button>}
+                  {isBoss && <div className="task-admin-actions"><button className="button-secondary task-complete" onClick={() => onEdit(task)}><Pencil size={15} /> Editar demanda</button><button className="button-danger-ghost task-complete" onClick={() => onDelete(task)}><Trash2 size={15} /> Excluir</button></div>}
                 </article>
               );
             })}
@@ -1107,8 +1183,11 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
     }
     setError("");
     try {
+      const deadline = new Date(values.deadline).toISOString();
       await onSave(
-        { ...values, title: values.title.trim(), deadline: new Date(values.deadline).toISOString() },
+        item
+          ? { assigned_user_id: values.assigned_user_id, deadline }
+          : { ...values, title: values.title.trim(), deadline },
         item?.id,
       );
     } catch (saveError) {
@@ -1116,15 +1195,83 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
     }
   }
 
-  return <Modal title={item ? "Editar demanda" : "Nova tarefa"} subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
+  return <Modal title={item ? "Editar tarefa" : "Nova tarefa"} subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
-      <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>
+      {item
+        ? <div className="task-edit-summary"><strong>{item.title}</strong>{item.description && <p>{item.description}</p>}<small>O nome e os detalhes da tarefa não podem ser editados.</small></div>
+        : <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>}
       <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required value={values.assigned_user_id} onChange={(event) => setValues({ ...values, assigned_user_id: event.target.value })}><option value="">Selecione um funcionário</option>{team.map((member) => <option key={member.id} value={member.id}>{member.name} · {member.sector}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
       <div className="form-field"><label htmlFor="task-deadline">Prazo final — data e hora <span className="required">*</span></label><input id="task-deadline" type="datetime-local" required value={values.deadline} onChange={(event) => setValues({ ...values, deadline: event.target.value })} /><small className="field-hint">O horário será salvo com o fuso local e exibido para a equipe.</small></div>
-      <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>
+      {!item && <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>}
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving || !team.length}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Criar tarefa"}</button></footer>
     </form>
+  </Modal>;
+}
+
+function TaskDeleteForm({ task, saving, onClose, onDelete }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  async function submit(event) {
+    event.preventDefault();
+    const cleanedReason = reason.trim();
+    if (cleanedReason.length < 3) {
+      setError("Informe o motivo da exclusão.");
+      return;
+    }
+    setError("");
+    try {
+      await onDelete(cleanedReason);
+    } catch (deleteError) {
+      setError(deleteError.message);
+    }
+  }
+
+  return <Modal title="Excluir tarefa" subtitle="REGISTRO ADMINISTRATIVO" onClose={onClose}>
+    <form className="modal-form" onSubmit={submit}>
+      <div className="task-edit-summary"><strong>{task.title}</strong><p>Responsável: {task.assignee_name} · Prazo: {formatDeadline(task.deadline)}</p><small>A tarefa será removida da lista ativa. A exclusão e o motivo ficarão registrados para consulta dos administradores.</small></div>
+      <div className="form-field"><label htmlFor="task-deletion-reason">Motivo da exclusão <span className="required">*</span></label><textarea id="task-deletion-reason" autoFocus required minLength={3} maxLength={500} rows="3" placeholder="Explique por que esta tarefa está sendo excluída…" value={reason} onChange={(event) => setReason(event.target.value)} /></div>
+      {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-danger-ghost" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Confirmar exclusão</button></footer>
+    </form>
+  </Modal>;
+}
+
+function TaskDeletionHistory({ onClose }) {
+  const [tasks, setTasks] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api("/tasks/deleted")
+      .then((rows) => { if (active) setTasks(rows); })
+      .catch((loadError) => { if (active) setError(loadError.message); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  return <Modal title="Tarefas excluídas" subtitle="HISTÓRICO DE EXCLUSÕES" onClose={onClose} wide>
+    <div className="task-deletion-history">
+      {loading ? <LoadingState /> : error ? <div className="error-banner"><CircleAlert size={18} /><span>{error}</span></div> : tasks.length ? (
+        <div className="task-list">
+          {tasks.map((task) => (
+            <article className="panel task-deletion-item" key={task.id}>
+              <div className="task-content">
+                <div className="task-title-row"><h3>{task.title}</h3></div>
+                <div className="task-meta">
+                  <span><Users size={14} />Responsável: {task.assignee_name} · {task.assignee_sector}</span>
+                  <span><CalendarDays size={14} />Prazo: {formatDeadline(task.deadline)}</span>
+                  <span>Excluída por {task.deleted_by_name || "Administrador"} · {formatDateTime(task.deleted_at)}</span>
+                </div>
+                <p className="task-deletion-reason"><strong>Motivo:</strong> {task.deletion_reason}</p>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : <EmptyState icon={Trash2} title="Nenhuma tarefa excluída" description="As tarefas removidas pelos administradores aparecerão aqui com o motivo informado." />}
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Fechar</button></footer>
+    </div>
   </Modal>;
 }
 
@@ -1282,6 +1429,63 @@ function AcknowledgmentDialog({ task, now, error, onAcknowledge }) {
         </div>
         {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
         <button className="button-primary acknowledgment-button" onClick={onAcknowledge}><Check size={17} /> Estou ciente</button>
+      </section>
+    </div>
+  );
+}
+
+function MissedTaskAcknowledgmentDialog({ task, saving, onAcknowledge }) {
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    const response = notes.trim();
+    if (!response) {
+      setError("A observação é obrigatória para confirmar a ciência.");
+      return;
+    }
+    setError("");
+    try {
+      await onAcknowledge(response);
+    } catch (submitError) {
+      setError(submitError.message);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop acknowledgment-backdrop missed-acknowledgment-backdrop">
+      <section className="modal acknowledgment-modal missed-acknowledgment-modal" role="dialog" aria-modal="true" aria-labelledby="missed-acknowledgment-title">
+        <div className="acknowledgment-symbol"><CircleAlert size={24} /></div>
+        <div className="eyebrow">TAREFA NÃO CONCLUÍDA</div>
+        <h2 id="missed-acknowledgment-title">Tarefa vencida</h2>
+        <p className="acknowledgment-intro">O prazo terminou e a tarefa foi registrada como não feita. Leia os dados e informe uma observação para confirmar a ciência. Esta janela só será fechada após o envio.</p>
+        <div className="acknowledgment-task urgent">
+          <strong>{task.title}</strong>
+          {task.description && <p>{task.description}</p>}
+          <span>Setor: {task.assignee_sector} · Data do vencimento: {formatDeadline(task.deadline)}</span>
+          <b><CircleAlert size={15} />Vencido</b>
+        </div>
+        <form className="missed-acknowledgment-form" onSubmit={submit}>
+          <div className="form-field">
+            <label htmlFor="missed-task-observation">Observação <span className="required">*</span></label>
+            <textarea
+              id="missed-task-observation"
+              autoFocus
+              required
+              maxLength={1000}
+              rows={4}
+              placeholder="Informe o motivo ou o que aconteceu…"
+              value={notes}
+              onChange={(event) => { setNotes(event.target.value); setError(""); }}
+            />
+          </div>
+          {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
+          <button className="button-primary acknowledgment-button" disabled={saving || !notes.trim()}>
+            {saving ? <LoaderCircle size={17} className="spin" /> : <Check size={17} />}
+            {saving ? "Registrando…" : "Confirmar ciência"}
+          </button>
+        </form>
       </section>
     </div>
   );
@@ -1901,6 +2105,7 @@ function RecordDialog({ item, isBoss, onClose, onDelete }) {
     <div className="record-detail">
       <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"} · Execução: {item.executor_name || item.created_by_name || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
       <div className="record-date"><CalendarDays size={17} /><span>{isMissedTask ? "Prazo vencido" : item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDateTime(activityDate)}</strong></div>
+      {isMissedTask && item.missed_acknowledged_at && <div className="record-date"><Check size={17} /><span>Ciência registrada</span><strong>{formatDateTime(item.missed_acknowledged_at)}</strong></div>}
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
       <div className="record-photos">
         <PhotoView label="Foto antes" photo={item.photo_before} />

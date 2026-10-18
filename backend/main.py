@@ -291,7 +291,12 @@ def initialize_database():
                 completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
                 schedule_id TEXT REFERENCES task_schedules(id) ON DELETE SET NULL,
                 scheduled_for TEXT,
-                missed_at TEXT
+                missed_at TEXT,
+                missed_notes TEXT,
+                missed_acknowledged_at TEXT,
+                deleted_at TEXT,
+                deletion_reason TEXT,
+                deleted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS company_notifications (
                 id TEXT PRIMARY KEY,
@@ -369,6 +374,13 @@ def initialize_database():
         )
         add_column_if_missing(conn, "tasks", "scheduled_for TEXT")
         add_column_if_missing(conn, "tasks", "missed_at TEXT")
+        add_column_if_missing(conn, "tasks", "missed_notes TEXT")
+        add_column_if_missing(conn, "tasks", "missed_acknowledged_at TEXT")
+        add_column_if_missing(conn, "tasks", "deleted_at TEXT")
+        add_column_if_missing(conn, "tasks", "deletion_reason TEXT")
+        add_column_if_missing(
+            conn, "tasks", "deleted_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_locations_company ON locations(company_id, name)"
         )
@@ -389,6 +401,9 @@ def initialize_database():
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_history ON tasks(company_id, completed_at, missed_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_deleted_company ON tasks(company_id, deleted_at DESC)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_notifications_company_date ON company_notifications(company_id, created_at DESC)"
@@ -445,7 +460,8 @@ def process_due_tasks(now: datetime | None = None):
                 )
         conn.execute(
             """UPDATE tasks SET missed_at = deadline
-                WHERE completed_at IS NULL AND missed_at IS NULL AND deadline <= ?""",
+                WHERE completed_at IS NULL AND missed_at IS NULL
+                    AND deleted_at IS NULL AND deadline <= ?""",
             (current.isoformat(timespec="seconds"),),
         )
 
@@ -670,22 +686,7 @@ class TaskInput(BaseModel):
 
 class TaskUpdateInput(BaseModel):
     assigned_user_id: str
-    title: Annotated[str, Field(min_length=2, max_length=120)]
-    description: Annotated[str, Field(max_length=1000)] = ""
     deadline: datetime
-
-    @field_validator("title")
-    @classmethod
-    def clean_task_title(cls, value: str) -> str:
-        cleaned = value.strip()
-        if not cleaned:
-            raise ValueError("O título da tarefa não pode ficar vazio.")
-        return cleaned
-
-    @field_validator("description")
-    @classmethod
-    def clean_task_description(cls, value: str) -> str:
-        return value.strip()
 
     @field_validator("deadline")
     @classmethod
@@ -696,6 +697,30 @@ class TaskUpdateInput(BaseModel):
         if deadline <= datetime.now(timezone.utc):
             raise ValueError("O prazo deve ser uma data e hora futuras.")
         return deadline
+
+
+class TaskDeletionInput(BaseModel):
+    reason: Annotated[str, Field(min_length=3, max_length=500)]
+
+    @field_validator("reason")
+    @classmethod
+    def clean_deletion_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if len(reason) < 3:
+            raise ValueError("Informe o motivo da exclusão.")
+        return reason
+
+
+class MissedTaskAcknowledgmentInput(BaseModel):
+    notes: Annotated[str, Field(min_length=1, max_length=1000)]
+
+    @field_validator("notes")
+    @classmethod
+    def clean_missed_notes(cls, value: str) -> str:
+        notes = value.strip()
+        if not notes:
+            raise ValueError("A observação é obrigatória.")
+        return notes
 
 
 class TaskCompletionInput(BaseModel):
@@ -929,7 +954,7 @@ def save_location_schedule(
         for task in conn.execute(
             """SELECT id, scheduled_for, assigned_user_id
                 FROM tasks WHERE schedule_id = ? AND completed_at IS NULL
-                    AND missed_at IS NULL AND deadline > ?""",
+                    AND missed_at IS NULL AND deleted_at IS NULL AND deadline > ?""",
             (existing["id"], current_utc),
         ).fetchall():
             occurrence_day = date.fromisoformat(task["scheduled_for"])
@@ -1583,9 +1608,27 @@ def list_tasks(session: dict = Depends(current_session)):
                 JOIN users u ON u.id = t.assigned_user_id
                 LEFT JOIN users executor ON executor.id = t.completed_by_user_id
                 WHERE {' AND '.join(clauses)}
+                    AND t.deleted_at IS NULL
                 ORDER BY CASE WHEN t.completed_at IS NULL AND t.missed_at IS NULL THEN 0 ELSE 1 END,
                     t.deadline ASC""",
             params,
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+@app.get("/api/tasks/deleted")
+def list_deleted_tasks(session: dict = Depends(company_only)):
+    with connection() as conn:
+        rows = conn.execute(
+            """SELECT t.id, t.title, t.description, t.deadline, t.deleted_at,
+                    t.deletion_reason, u.name AS assignee_name,
+                    u.sector AS assignee_sector, deleter.name AS deleted_by_name
+                FROM tasks t
+                JOIN users u ON u.id = t.assigned_user_id
+                LEFT JOIN users deleter ON deleter.id = t.deleted_by_user_id
+                WHERE t.company_id = ? AND t.deleted_at IS NOT NULL
+                ORDER BY t.deleted_at DESC""",
+            (session["company_id"],),
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -1639,7 +1682,7 @@ def update_task(
         if assignee is None:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado nesta empresa.")
         existing = conn.execute(
-            """SELECT assigned_user_id, title, description, deadline, completed_at, missed_at
+            """SELECT assigned_user_id, deadline, completed_at, missed_at, deleted_at
                 FROM tasks WHERE id = ? AND company_id = ?""",
             (task_id, session["company_id"]),
         ).fetchone()
@@ -1649,29 +1692,30 @@ def update_task(
             raise HTTPException(status_code=409, detail="Demandas concluídas não podem ser editadas.")
         if existing["missed_at"] is not None:
             raise HTTPException(status_code=409, detail="Tarefas vencidas não podem ser editadas.")
+        if existing["deleted_at"] is not None:
+            raise HTTPException(status_code=409, detail="Tarefas excluídas não podem ser editadas.")
         deadline = payload.deadline.isoformat(timespec="seconds")
         changed = any(
             (
                 existing["assigned_user_id"] != payload.assigned_user_id,
-                existing["title"] != payload.title,
-                existing["description"] != payload.description,
                 existing["deadline"] != deadline,
             )
         )
-        conn.execute(
-            """UPDATE tasks SET assigned_user_id = ?, title = ?, description = ?,
+        cursor = conn.execute(
+            """UPDATE tasks SET assigned_user_id = ?,
                     deadline = ?, acknowledged_at = CASE WHEN ? THEN NULL ELSE acknowledged_at END
-                WHERE id = ? AND company_id = ?""",
+                WHERE id = ? AND company_id = ? AND deleted_at IS NULL
+                    AND completed_at IS NULL AND missed_at IS NULL""",
             (
                 payload.assigned_user_id,
-                payload.title,
-                payload.description,
                 deadline,
                 changed,
                 task_id,
                 session["company_id"],
             ),
         )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=409, detail="Esta tarefa não pode mais ser editada.")
         row = conn.execute(
             """SELECT t.*, u.name AS assignee_name, u.sector AS assignee_sector,
                     executor.name AS completed_by_name
@@ -1681,6 +1725,36 @@ def update_task(
             (task_id, session["company_id"]),
         ).fetchone()
     return dict(row)
+
+
+@app.delete("/api/tasks/{task_id}", status_code=204)
+def delete_task(
+    task_id: str,
+    payload: TaskDeletionInput,
+    session: dict = Depends(company_only),
+):
+    process_due_tasks()
+    deleted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        task = conn.execute(
+            """SELECT completed_at, missed_at, deleted_at FROM tasks
+                WHERE id = ? AND company_id = ?""",
+            (task_id, session["company_id"]),
+        ).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada.")
+        if task["deleted_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa já foi excluída.")
+        if task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Tarefas concluídas não podem ser excluídas.")
+        cursor = conn.execute(
+            """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?
+                WHERE id = ? AND company_id = ? AND deleted_at IS NULL
+                    AND completed_at IS NULL AND missed_at IS NULL""",
+            (deleted_at, payload.reason, session["account_id"], task_id, session["company_id"]),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=409, detail="Esta tarefa não pode mais ser excluída.")
 
 
 @app.post("/api/tasks/{task_id}/acknowledge")
@@ -1696,7 +1770,7 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
                 JOIN users active_user ON active_user.id = ?
-                WHERE t.id = ? AND t.company_id = ?
+                WHERE t.id = ? AND t.company_id = ? AND t.deleted_at IS NULL
                     AND assigned.company_id = ? AND active_user.company_id = ?""",
             (
                 session["account_id"],
@@ -1718,7 +1792,7 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
             """UPDATE tasks SET acknowledged_at = ?
                 WHERE id = ? AND company_id = ?
                     AND acknowledged_at IS NULL AND completed_at IS NULL
-                    AND missed_at IS NULL AND deadline > ?""",
+                    AND missed_at IS NULL AND deleted_at IS NULL AND deadline > ?""",
             (now, task_id, session["company_id"], now),
         )
         if cursor.rowcount == 0:
@@ -1730,6 +1804,52 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
             (str(uuid.uuid4()), session["company_id"], task_id, session["account_id"], now),
         )
     return {"id": task_id, "acknowledged_at": now}
+
+
+@app.post("/api/tasks/{task_id}/missed-acknowledge")
+def acknowledge_missed_task(
+    task_id: str,
+    payload: MissedTaskAcknowledgmentInput,
+    session: dict = Depends(current_session),
+):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Somente o funcionário responsável pode confirmar uma tarefa vencida.")
+    process_due_tasks()
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        task = conn.execute(
+            """SELECT missed_at, completed_at, missed_notes, missed_acknowledged_at
+                FROM tasks
+                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                    AND deleted_at IS NULL""",
+            (task_id, session["company_id"], session["account_id"]),
+        ).fetchone()
+        if task is None:
+            raise HTTPException(status_code=404, detail="Tarefa vencida não encontrada nesta conta.")
+        if task["missed_at"] is None or task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa ainda não venceu.")
+        if task["missed_acknowledged_at"] is not None:
+            return {
+                "id": task_id,
+                "missed_acknowledged_at": task["missed_acknowledged_at"],
+                "missed_notes": task["missed_notes"],
+            }
+        cursor = conn.execute(
+            """UPDATE tasks SET missed_notes = ?, missed_acknowledged_at = ?
+                WHERE id = ? AND company_id = ? AND assigned_user_id = ?
+                    AND missed_at IS NOT NULL AND completed_at IS NULL
+                    AND deleted_at IS NULL AND missed_acknowledged_at IS NULL""",
+            (
+                payload.notes,
+                now,
+                task_id,
+                session["company_id"],
+                session["account_id"],
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=409, detail="A confirmação desta tarefa foi atualizada em outro dispositivo.")
+    return {"id": task_id, "missed_acknowledged_at": now, "missed_notes": payload.notes}
 
 
 @app.post("/api/tasks/{task_id}/complete")
@@ -1756,7 +1876,7 @@ def complete_task(
                 FROM tasks t
                 JOIN users assigned ON assigned.id = t.assigned_user_id
                 JOIN users active_user ON active_user.id = ?
-                WHERE t.id = ? AND t.company_id = ?
+                WHERE t.id = ? AND t.company_id = ? AND t.deleted_at IS NULL
                     AND assigned.company_id = ? AND active_user.company_id = ?""",
             (
                 session["account_id"],
@@ -1792,7 +1912,7 @@ def complete_task(
                     photo_before = ?, photo_after = ?, completed_by_user_id = ?
                 WHERE id = ? AND company_id = ?
                     AND acknowledged_at IS NOT NULL AND completed_at IS NULL
-                    AND missed_at IS NULL AND deadline > ?""",
+                    AND missed_at IS NULL AND deleted_at IS NULL AND deadline > ?""",
             (
                 now,
                 payload.notes,
@@ -2184,6 +2304,7 @@ def list_history(
         task_clauses = [
             "t.company_id = ?",
             "(t.completed_at IS NOT NULL OR t.missed_at IS NOT NULL)",
+            "t.deleted_at IS NULL",
         ]
         task_params: list[str] = [session["company_id"]]
         if session["role"] == "user":
@@ -2220,9 +2341,13 @@ def list_history(
                     t.missed_at AS missed_at,
                     CASE WHEN t.missed_at IS NOT NULL THEN 'Não feito' ELSE 'Concluída' END AS status,
                     t.photo_before, t.photo_after,
-                    t.completion_notes AS notes, COALESCE(t.completed_at, t.missed_at) AS created_at,
+                    CASE WHEN t.missed_at IS NOT NULL THEN t.missed_notes
+                        ELSE t.completion_notes END AS notes,
+                    t.missed_acknowledged_at AS missed_acknowledged_at,
+                    COALESCE(t.completed_at, t.missed_at) AS created_at,
                     COALESCE(t.completed_at, t.missed_at) AS event_at,
-                    t.title AS location_name, assigned.name AS responsible,
+                    t.title AS location_name, t.deadline AS deadline,
+                    assigned.name AS responsible, assigned.sector AS assignee_sector,
                     assigned.sector AS responsible_sector,
                     executor.name AS executor_name,
                     executor.name AS created_by_name
@@ -2242,16 +2367,26 @@ def list_history(
 
 
 @app.delete("/api/tasks/{task_id}/missed", status_code=204)
-def delete_missed_task(task_id: str, session: dict = Depends(company_only)):
+def delete_missed_task(
+    task_id: str,
+    payload: TaskDeletionInput,
+    session: dict = Depends(company_only),
+):
     with connection() as conn:
         cursor = conn.execute(
-            """DELETE FROM tasks
+            """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?
                 WHERE id = ? AND company_id = ? AND missed_at IS NOT NULL
-                    AND completed_at IS NULL""",
-            (task_id, session["company_id"]),
+                    AND completed_at IS NULL AND deleted_at IS NULL""",
+            (
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                payload.reason,
+                session["account_id"],
+                task_id,
+                session["company_id"],
+            ),
         )
         if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Tarefa vencida não encontrada.")
+            raise HTTPException(status_code=409, detail="A tarefa vencida não pode mais ser excluída.")
 
 
 @app.post("/api/history", status_code=201)

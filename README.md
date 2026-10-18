@@ -137,6 +137,8 @@ git push origin android-v9.0
 
 O push da tag inicia o workflow e cria uma Release com o APK. Depois, anexe `Routine-Setup-3.0.0.exe` nessa mesma Release pela página do GitHub ou com `gh release upload android-v9.0 release\download-3.0\Routine-Setup-3.0.0.exe`. Não reutilize a tag `android-v9.0` para outra build; para uma correção posterior, aumente a versão/tag.
 
+Se uma execução de publicação falhar e a tag já existir, primeiro envie a correção do workflow para `main` e crie uma nova tag; a tag anterior continua apontando para o commit antigo e repetir o workflow nela reutiliza a definição antiga. Por exemplo, após corrigir a publicação de `android-v9.0`, use `android-v9.0.1` e anexe o instalador desktop à nova Release.
+
 ### Migrar a base local do Windows
 
 Faça backup da base SQLite e das fotos antes de migrar. Feche o Routiner desktop para evitar alterações durante a cópia. No Windows, a base do instalador fica em `%APPDATA%\Routiner\data\routiner.db` e as fotos em `%APPDATA%\Routiner\data\uploads`. Se os dados estiverem na versão de desenvolvimento, use `backend\cleaning.db` e `backend\uploads` como origem.

@@ -115,7 +115,27 @@ npm ci
 npm run android:apk
 ```
 
-O APK de teste aparece em `android\app\build\outputs\apk\debug\app-debug.apk`. Para compilar pelo GitHub, envie as alterações para `main` e baixe o artefato **Routiner-Android-...** na execução do workflow **Build Routiner Android app** em Actions. Para publicar um APK na área **Releases**, envie uma tag como `android-v1.0.0`; o workflow compila e anexa o APK automaticamente. O workflow gera um APK assinado com a chave de depuração do Android, adequado para teste e instalação direta, mas não para publicação na Play Store. A chave de depuração de cada execução do GitHub pode variar; para instalar uma atualização futura sobre a mesma instalação, será necessário configurar uma chave de assinatura privada persistente. O Android pode pedir autorização para instalar apps dessa fonte. O usuário instala o APK, abre o Routiner e entra com uma conta existente no servidor; não precisa instalar Tailscale nem configurar a URL.
+O APK de teste aparece em `android\app\build\outputs\apk\debug\app-debug.apk`. Para compilar pelo GitHub, envie as alterações para `main` e baixe o artefato **Routiner-Android-...** na execução do workflow **Build Routiner Android app** em Actions. Para publicar o APK da versão 9.0 na área **Releases**, envie a tag `android-v9.0`; o workflow compila e anexa o APK automaticamente. O instalador desktop da versão 3.0 é gerado no Windows e pode ser anexado à mesma Release:
+
+```powershell
+npm run build:web
+npm run build:api
+npx electron-builder --win nsis --config.directories.output=release/download-3.0
+```
+
+O instalador será salvo em `release\download-3.0\Routine-Setup-3.0.0.exe`. O workflow gera um APK assinado com a chave de depuração do Android, adequado para teste e instalação direta, mas não para publicação na Play Store. A chave de depuração de cada execução do GitHub pode variar; para instalar uma atualização futura sobre a mesma instalação, será necessário configurar uma chave de assinatura privada persistente. O Android pode pedir autorização para instalar apps dessa fonte. O usuário instala o APK, abre o Routiner e entra com uma conta existente no servidor; não precisa instalar Tailscale nem configurar a URL.
+
+Para publicar as duas versões 3.0 (desktop) e 9.0 (Android) no GitHub, depois de testar e criar um commit, envie a branch `main` e a tag do Android:
+
+```powershell
+git add package.json package-lock.json desktop/main.cjs android/app/build.gradle README.md
+git commit -m "Atualiza versões desktop 3.0 e Android 9.0"
+git push origin main
+git tag android-v9.0
+git push origin android-v9.0
+```
+
+O push da tag inicia o workflow e cria uma Release com o APK. Depois, anexe `Routine-Setup-3.0.0.exe` nessa mesma Release pela página do GitHub ou com `gh release upload android-v9.0 release\download-3.0\Routine-Setup-3.0.0.exe`. Não reutilize a tag `android-v9.0` para outra build; para uma correção posterior, aumente a versão/tag.
 
 ### Migrar a base local do Windows
 

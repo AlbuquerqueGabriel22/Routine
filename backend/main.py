@@ -467,7 +467,7 @@ def schedule_occurs_on(
 def process_due_tasks(now: datetime | None = None):
     current = now or datetime.now(timezone.utc)
     local_today = current.astimezone(SCHEDULE_TIMEZONE).date()
-    generation_end = local_today + timedelta(days=6)
+    generation_end = local_today + timedelta(days=45)
     with connection() as conn:
         schedules = conn.execute(
             """SELECT s.*, l.name AS location_name, l.frequency

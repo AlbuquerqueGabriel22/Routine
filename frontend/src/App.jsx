@@ -10,6 +10,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleAlert,
   ClipboardCheck,
@@ -1082,27 +1083,311 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
 
 function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onDelete, onDeletionHistory, onComplete }) {
   const [sector, setSector] = useState("");
-  const sectorTasks = tasks.filter((task) => isTaskForToday(task, now)
-    && (!isBoss || !sector || sameSector(task.assignee_sector, sector)));
-  const pending = sectorTasks.filter((task) => !task.completed_at && !task.missed_at);
-  const completed = sectorTasks.filter((task) => task.completed_at || task.missed_at);
+  const [viewMode, setViewMode] = useState("list"); // 'list' | 'calendar'
+  const [periodFilter, setPeriodFilter] = useState("Diário"); // 'Diário' | 'Semanal' | 'Mensal'
+  const [monthWeekFilter, setMonthWeekFilter] = useState("all"); // 'all' | '1' | '2' | '3' | '4' | 'last'
+  const [activeDate, setActiveDate] = useState(() => new Date(now));
+
+  // Base filtrada por setor
+  const sectorTasks = useMemo(() => {
+    return tasks.filter((task) => (!isBoss || !sector || sameSector(task.assignee_sector, sector)));
+  }, [tasks, isBoss, sector]);
+
+  // Helpers de data
+  const todayStr = useMemo(() => localDateValue(new Date(now)), [now]);
+  const activeDateStr = useMemo(() => localDateValue(activeDate), [activeDate]);
+
+  // Dias da semana corrente para o modo Semanal
+  const currentWeekDays = useMemo(() => {
+    const d = new Date(activeDate);
+    const day = (d.getDay() + 6) % 7; // Seg = 0
+    const monday = new Date(d);
+    monday.setDate(d.getDate() - day);
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const current = new Date(monday);
+      current.setDate(monday.getDate() + i);
+      days.push(current);
+    }
+    return days;
+  }, [activeDate]);
+
+  // Semanas do mês atual para o calendário
+  const monthWeeksData = useMemo(() => {
+    const year = activeDate.getFullYear();
+    const month = activeDate.getMonth();
+    const firstDayOfMonth = new Date(year, month, 1);
+    const lastDayOfMonth = new Date(year, month + 1, 0);
+
+    // Encontra a segunda-feira da primeira semana
+    const start = new Date(firstDayOfMonth);
+    const startWeekday = (start.getDay() + 6) % 7;
+    start.setDate(start.getDate() - startWeekday);
+
+    const weeks = [];
+    let currentCursor = new Date(start);
+
+    while (currentCursor <= lastDayOfMonth || (currentCursor.getDay() + 6) % 7 !== 0) {
+      const weekDays = [];
+      for (let i = 0; i < 7; i++) {
+        weekDays.push(new Date(currentCursor));
+        currentCursor.setDate(currentCursor.getDate() + 1);
+      }
+      weeks.push(weekDays);
+      if (currentCursor > lastDayOfMonth && (currentCursor.getDay() + 6) % 7 === 0) break;
+    }
+    return weeks;
+  }, [activeDate]);
+
+  // Determinar número da semana do mês para uma data
+  function getWeekOfMonth(dateObj) {
+    const d = dateObj.getDate();
+    return Math.min(Math.floor((d - 1) / 7) + 1, 4);
+  }
+
+  function isLastWeekOfMonth(dateObj) {
+    const nextWeek = new Date(dateObj);
+    nextWeek.setDate(dateObj.getDate() + 7);
+    return nextWeek.getMonth() !== dateObj.getMonth();
+  }
+
+  // Filtragem das tarefas de acordo com o período selecionado
+  const filteredTasks = useMemo(() => {
+    return sectorTasks.filter((task) => {
+      const taskDateStr = task.scheduled_for || localDateValue(task.deadline);
+      const [y, m, d] = (taskDateStr || "").split("-").map(Number);
+      if (!y || !m || !d) return false;
+      const taskDate = new Date(y, m - 1, d);
+
+      if (periodFilter === "Diário") {
+        return taskDateStr === (viewMode === "calendar" ? activeDateStr : todayStr);
+      }
+
+      if (periodFilter === "Semanal") {
+        const startWeekStr = localDateValue(currentWeekDays[0]);
+        const endWeekStr = localDateValue(currentWeekDays[6]);
+        return taskDateStr >= startWeekStr && taskDateStr <= endWeekStr;
+      }
+
+      if (periodFilter === "Mensal") {
+        const isSameMonth = taskDate.getFullYear() === activeDate.getFullYear()
+          && taskDate.getMonth() === activeDate.getMonth();
+        if (!isSameMonth) return false;
+
+        if (monthWeekFilter === "all") return true;
+        if (monthWeekFilter === "last") return isLastWeekOfMonth(taskDate);
+        return String(getWeekOfMonth(taskDate)) === monthWeekFilter;
+      }
+
+      return true;
+    });
+  }, [sectorTasks, periodFilter, monthWeekFilter, viewMode, activeDateStr, todayStr, currentWeekDays, activeDate]);
+
+  const pending = filteredTasks.filter((task) => !task.completed_at && !task.missed_at);
+  const completed = filteredTasks.filter((task) => task.completed_at || task.missed_at);
+
+  function prevPeriod() {
+    setActiveDate((prev) => {
+      const next = new Date(prev);
+      if (periodFilter === "Diário") next.setDate(prev.getDate() - 1);
+      else if (periodFilter === "Semanal") next.setDate(prev.getDate() - 7);
+      else next.setMonth(prev.getMonth() - 1);
+      return next;
+    });
+  }
+
+  function nextPeriod() {
+    setActiveDate((prev) => {
+      const next = new Date(prev);
+      if (periodFilter === "Diário") next.setDate(prev.getDate() + 1);
+      else if (periodFilter === "Semanal") next.setDate(prev.getDate() + 7);
+      else next.setMonth(prev.getMonth() + 1);
+      return next;
+    });
+  }
+
+  function resetToday() {
+    setActiveDate(new Date(now));
+  }
+
+  const periodLabel = useMemo(() => {
+    if (periodFilter === "Diário") {
+      return activeDate.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "long", year: "numeric" });
+    }
+    if (periodFilter === "Semanal") {
+      const start = currentWeekDays[0];
+      const end = currentWeekDays[6];
+      return `${start.getDate()} de ${start.toLocaleDateString("pt-BR", { month: "short" })} – ${end.getDate()} de ${end.toLocaleDateString("pt-BR", { month: "short", year: "numeric" })}`;
+    }
+    return activeDate.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  }, [periodFilter, activeDate, currentWeekDays]);
+
   return (
     <>
       <PageHeading
         eyebrow={isBoss ? "GESTÃO DA EQUIPE" : "SUA ROTINA"}
         title="Tarefas com prazo"
         description={isBoss
-          ? "Acompanhe as tarefas previstas para hoje, a ciência da equipe e as conclusões."
-          : "Veja as tarefas previstas para hoje no seu setor e registre as execuções."}
-        action={isBoss && <div className="heading-actions"><button className="button-secondary" onClick={onDeletionHistory}><Trash2 size={16} /> Exclusões</button><button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button></div>}
+          ? "Acompanhe as rotinas no calendário, filtre por frequência e gerencie a execução da equipe."
+          : "Veja suas tarefas em lista ou calendário, organizadas por dia, semana ou mês."}
+        action={
+          <div className="heading-actions">
+            <div className="view-mode-toggle" role="group" aria-label="Modo de visualização">
+              <button
+                type="button"
+                className={`button-toggle ${viewMode === "list" ? "active" : ""}`}
+                onClick={() => setViewMode("list")}
+              >
+                <ListChecks size={15} /> Lista
+              </button>
+              <button
+                type="button"
+                className={`button-toggle ${viewMode === "calendar" ? "active" : ""}`}
+                onClick={() => setViewMode("calendar")}
+              >
+                <CalendarDays size={15} /> Calendário
+              </button>
+            </div>
+            {isBoss && (
+              <>
+                <button className="button-secondary" onClick={onDeletionHistory}><Trash2 size={16} /> Exclusões</button>
+                <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>
+              </>
+            )}
+          </div>
+        }
       />
-      {isBoss && <div className="toolbar panel"><div className="toolbar-copy"><span className="result-count">{sectorTasks.length}</span><span>{sectorTasks.length === 1 ? "tarefa" : "tarefas"}</span></div><div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div></div>}
+
+      <div className="toolbar panel task-calendar-toolbar">
+        <div className="period-filter-group" role="group" aria-label="Filtro de período">
+          {["Diário", "Semanal", "Mensal"].map((f) => (
+            <button
+              key={f}
+              type="button"
+              className={`period-filter-pill ${periodFilter === f ? "selected" : ""}`}
+              onClick={() => {
+                setPeriodFilter(f);
+                if (f !== "Mensal") setMonthWeekFilter("all");
+              }}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+
+        {periodFilter === "Mensal" && (
+          <div className="filter-control month-week-filter">
+            <CalendarDays size={15} />
+            <select
+              value={monthWeekFilter}
+              onChange={(e) => setMonthWeekFilter(e.target.value)}
+              aria-label="Filtrar semana do mês"
+            >
+              <option value="all">Todas as semanas</option>
+              <option value="1">1ª semana</option>
+              <option value="2">2ª semana</option>
+              <option value="3">3ª semana</option>
+              <option value="4">4ª semana</option>
+              <option value="last">Última semana</option>
+            </select>
+            <ChevronDown size={14} />
+          </div>
+        )}
+
+        <div className="calendar-navigator">
+          <button type="button" className="icon-button" onClick={prevPeriod} title="Período anterior" aria-label="Período anterior">
+            <ChevronLeft size={16} />
+          </button>
+          <strong className="calendar-period-label">{periodLabel}</strong>
+          <button type="button" className="icon-button" onClick={nextPeriod} title="Próximo período" aria-label="Próximo período">
+            <ChevronRight size={16} />
+          </button>
+          <button type="button" className="button-secondary compact-today" onClick={resetToday}>
+            Hoje
+          </button>
+        </div>
+
+        {isBoss && (
+          <div className="filter-control">
+            <Users size={15} />
+            <select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor">
+              <option value="">Todos os setores</option>
+              {sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
+            </select>
+            <ChevronDown size={14} />
+          </div>
+        )}
+      </div>
+
       {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) && (
         <div className="task-reminder"><CircleAlert size={17} /> Você tem uma tarefa que precisa de ciência. Confirme o aviso para continuar.</div>
       )}
+
+      {/* Visualização de Calendário Interativo */}
+      {viewMode === "calendar" && (
+        <div className="calendar-grid-card panel">
+          <div className="calendar-grid-header">
+            {WEEKDAYS.map((day) => <div className="calendar-head-cell" key={day}>{day}</div>)}
+          </div>
+          <div className="calendar-grid-body">
+            {monthWeeksData.map((week, wIdx) => {
+              const weekNum = String(wIdx + 1);
+              const isLastWeek = wIdx === monthWeeksData.length - 1;
+              const matchesWeekFilter = monthWeekFilter === "all"
+                || (monthWeekFilter === "last" && isLastWeek)
+                || (monthWeekFilter === weekNum);
+
+              return week.map((dateObj) => {
+                const dayDateStr = localDateValue(dateObj);
+                const isCurrentMonth = dateObj.getMonth() === activeDate.getMonth();
+                const isToday = dayDateStr === todayStr;
+                const isSelected = dayDateStr === activeDateStr;
+
+                const dayTasks = sectorTasks.filter((t) => (t.scheduled_for || localDateValue(t.deadline)) === dayDateStr);
+                const dayPending = dayTasks.filter((t) => !t.completed_at && !t.missed_at).length;
+                const dayCompleted = dayTasks.filter((t) => t.completed_at && !t.missed_at).length;
+                const dayMissed = dayTasks.filter((t) => t.missed_at).length;
+
+                return (
+                  <button
+                    type="button"
+                    key={dayDateStr}
+                    onClick={() => {
+                      setActiveDate(new Date(dateObj));
+                      if (periodFilter !== "Diário") setPeriodFilter("Diário");
+                    }}
+                    className={`calendar-cell ${!isCurrentMonth ? "other-month" : ""} ${isToday ? "is-today" : ""} ${isSelected ? "is-selected" : ""} ${!matchesWeekFilter ? "dimmed-week" : ""}`}
+                  >
+                    <div className="calendar-date-number">
+                      <span>{dateObj.getDate()}</span>
+                      {isToday && <span className="today-badge">Hoje</span>}
+                    </div>
+                    {dayTasks.length > 0 && (
+                      <div className="calendar-cell-badges">
+                        {dayPending > 0 && <span className="cal-badge pending" title={`${dayPending} pendente(s)`}>{dayPending} pendente</span>}
+                        {dayCompleted > 0 && <span className="cal-badge done" title={`${dayCompleted} concluída(s)`}>{dayCompleted} feita</span>}
+                        {dayMissed > 0 && <span className="cal-badge missed" title={`${dayMissed} não feita(s)`}>{dayMissed} vencida</span>}
+                      </div>
+                    )}
+                  </button>
+                );
+              });
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Lista de tarefas */}
       <section className="task-section">
-        <div className="section-head"><div><h2>Em andamento</h2><p>{pending.length} {pending.length === 1 ? "tarefa pendente" : "tarefas pendentes"}</p></div></div>
-        {loading && !tasks.length ? <LoadingState /> : pending.length ? (
+        <div className="section-head">
+          <div>
+            <h2>Em andamento</h2>
+            <p>{pending.length} {pending.length === 1 ? "tarefa pendente" : "tarefas pendentes"} {periodFilter !== "Diário" ? `(${periodFilter.toLowerCase()})` : ""}</p>
+          </div>
+        </div>
+        {loading && !tasks.length ? (
+          <LoadingState />
+        ) : pending.length ? (
           <div className="task-list">
             {pending.map((task) => {
               const urgency = deadlineUrgency(task.deadline, now);
@@ -1112,7 +1397,12 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                     <CircleAlert size={19} />
                   </div>
                   <div className="task-content">
-                    <div className="task-title-row"><h3>{task.title}</h3><span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>{task.acknowledged_at ? "Ciente" : "Aguardando ciência"}</span></div>
+                    <div className="task-title-row">
+                      <h3>{task.title}</h3>
+                      <span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>
+                        {task.acknowledged_at ? "Ciente" : "Aguardando ciência"}
+                      </span>
+                    </div>
                     {task.description && <p className="task-description">{task.description}</p>}
                     <div className="task-meta">
                       <span><Clock3 size={14} />{deadlineCountdown(task.deadline, now)} · {formatDeadline(task.deadline)}</span>
@@ -1124,22 +1414,52 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                       <Check size={16} /> Fazer tarefa
                     </button>
                   )}
-                  {isBoss && <div className="task-admin-actions"><button className="button-secondary task-complete" onClick={() => onEdit(task)}><Pencil size={15} /> Editar demanda</button><button className="button-danger-ghost task-complete" onClick={() => onDelete(task)}><Trash2 size={15} /> Excluir</button></div>}
+                  {isBoss && (
+                    <div className="task-admin-actions">
+                      <button className="button-secondary task-complete" onClick={() => onEdit(task)}>
+                        <Pencil size={15} /> Editar demanda
+                      </button>
+                      <button className="button-danger-ghost task-complete" onClick={() => onDelete(task)}>
+                        <Trash2 size={15} /> Excluir
+                      </button>
+                    </div>
+                  )}
                 </article>
               );
             })}
           </div>
-        ) : <EmptyState className="task-empty" icon={ListChecks} title="Nenhuma tarefa pendente para hoje" description={isBoss ? "As tarefas programadas para outros dias aparecerão na data prevista. Você também pode criar uma tarefa avulsa." : "As tarefas programadas aparecerão aqui no dia previsto para execução."} action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>} />}
+        ) : (
+          <EmptyState
+            className="task-empty"
+            icon={ListChecks}
+            title={periodFilter === "Diário" ? "Nenhuma tarefa pendente para esta data" : `Nenhuma tarefa pendente neste filtro (${periodFilter})`}
+            description={isBoss ? "As tarefas programadas aparecerão na data prevista. Você também pode criar uma tarefa avulsa." : "As tarefas programadas aparecerão aqui no dia previsto para execução."}
+            action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>}
+          />
+        )}
       </section>
+
       {completed.length > 0 && (
         <section className="task-section completed-tasks">
-          <div className="section-head"><div><h2>Concluídas e vencidas hoje</h2><p>{completed.length} {completed.length === 1 ? "registro" : "registros"} finalizados</p></div></div>
+          <div className="section-head">
+            <div>
+              <h2>Concluídas e vencidas</h2>
+              <p>{completed.length} {completed.length === 1 ? "registro finalizado" : "registros finalizados"}</p>
+            </div>
+          </div>
           <div className="task-list">
             {completed.map((task) => (
               <article className="panel task-card task-card-complete" key={task.id}>
-                <span className={`task-alert ${task.missed_at ? "urgent" : "completed"}`}>{task.missed_at ? <CircleAlert size={18} /> : <Check size={18} />}</span>
+                <span className={`task-alert ${task.missed_at ? "urgent" : "completed"}`}>
+                  {task.missed_at ? <CircleAlert size={18} /> : <Check size={18} />}
+                </span>
                 <div className="task-content">
-                  <div className="task-title-row"><h3>{task.title}</h3><span className={`status-pill ${task.missed_at ? "status-attention" : "status-done"}`}>{task.missed_at ? "Não feito" : "Concluída"}</span></div>
+                  <div className="task-title-row">
+                    <h3>{task.title}</h3>
+                    <span className={`status-pill ${task.missed_at ? "status-attention" : "status-done"}`}>
+                      {task.missed_at ? "Não feito" : "Concluída"}
+                    </span>
+                  </div>
                   <div className="task-meta">
                     <span><CalendarDays size={14} />{task.missed_at ? "Venceu" : "Concluída"}: {formatDeadline(task.missed_at || task.completed_at)}</span>
                     <span><Users size={14} />Responsável: {task.assignee_name}{task.completed_by_name ? ` · Execução: ${task.completed_by_name}` : ""}</span>

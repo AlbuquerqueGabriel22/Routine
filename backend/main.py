@@ -1079,7 +1079,7 @@ def save_location_schedule(
             json.dumps(weekdays),
             due_time,
             month_week,
-            alternate_weeks,
+            int(alternate_weeks),
             anchor_date,
             (today - timedelta(days=1)).isoformat(),
             datetime.now(timezone.utc).isoformat(timespec="seconds"),

@@ -547,7 +547,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
         <div className="brand">
           <div className="brand-mark"><Leaf size={20} strokeWidth={2.2} /></div>
-            <div><strong>Routiner</strong><span>GESTÃO DE LIMPEZA</span></div>
+          <div><strong>Routiner</strong><span>GESTÃO DE LIMPEZA</span></div>
           <button className="icon-button sidebar-close" onClick={() => setMobileNav(false)} aria-label="Fechar menu"><X size={18} /></button>
         </div>
         <div className="workspace-label">ESPAÇO DE TRABALHO</div>
@@ -2053,13 +2053,10 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
     ...allLocations.map((location) => location.responsible_sector),
   ].filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "pt-BR"));
-  const typeOptions = [...new Set(allLocations
-    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
-    .map((location) => location.cleaning_type || "Estrutural"))]
-    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = ["Utensílios", "Equipamento", "Estrutural"];
   const itemOptions = allLocations.filter((location) =>
     (!sector || sameSector(location.responsible_sector, sector))
-      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
+    && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
   const responsibleOptions = [...new Set(allLocations
     .filter((location) => (!sector || sameSector(location.responsible_sector, sector))
       && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType))
@@ -2067,8 +2064,8 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
     .sort((a, b) => a.localeCompare(b, "pt-BR"));
   const sectorLocations = locations.filter((location) =>
     (!sector || sameSector(location.responsible_sector, sector))
-      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType)
-      && (!itemId || location.id === itemId));
+    && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType)
+    && (!itemId || location.id === itemId));
   return (
     <>
       <PageHeading eyebrow="ORGANIZAÇÃO" title="Limpeza" description={isBoss ? "Cadastre os itens que devem ser limpos e organize-os por setor e tipo de limpeza." : "Consulte os itens de limpeza do seu setor e registre as atividades."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo item</button>} />
@@ -2131,17 +2128,14 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
     ...sectors.map((item) => item.name),
     ...entries.map((entry) => entry.responsible_sector),
   ].filter(Boolean))].sort((left, right) => left.localeCompare(right, "pt-BR"));
-  const typeOptions = [...new Set(locations
-    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
-    .map((location) => location.cleaning_type || "Estrutural"))]
-    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = ["Utensílios", "Equipamento", "Estrutural"];
   const itemOptions = locations.filter((location) =>
     (!sector || sameSector(location.responsible_sector, sector))
-      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
+    && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
   const filteredEntries = entries.filter((entry) =>
     (!sector || sameSector(entry.responsible_sector, sector))
-      && (!cleaningType || (entry.cleaning_type || "Estrutural") === cleaningType)
-      && (!locationId || entry.location_id === locationId));
+    && (!cleaningType || (entry.cleaning_type || "Estrutural") === cleaningType)
+    && (!locationId || entry.location_id === locationId));
   return (
     <>
       <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." action={<button className="button-primary" onClick={onAdd} disabled={!locations.length}><Plus size={17} /> Registrar limpeza</button>} />
@@ -2346,18 +2340,8 @@ function LocationForm({ item, initialSector = "", locations, team, sectors, savi
   });
   const [sector, setSector] = useState(item?.responsible_sector || initialSector || team.find((member) =>
     member.id === item?.responsible_user_id || member.name === item?.responsible)?.sector || "");
-  const [customCleaningTypes, setCustomCleaningTypes] = useState([]);
-  const [addingCleaningType, setAddingCleaningType] = useState(false);
-  const [newCleaningType, setNewCleaningType] = useState("");
   const sectorTeam = team.filter((member) => Boolean(sector) && member.sector === sector);
-  const cleaningTypeOptions = [...new Set([
-    "Estrutural",
-    ...locations
-      .filter((location) => sameSector(location.responsible_sector, sector))
-      .map((location) => location.cleaning_type || "Estrutural"),
-    ...customCleaningTypes.filter((type) => type.sector === sector).map((type) => type.name),
-    ...(item && sameSector(item.responsible_sector, sector) ? [values.cleaning_type] : []),
-  ])].sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const cleaningTypeOptions = ["Utensílios", "Equipamento", "Estrutural"];
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   function changeSector(value) {
@@ -2367,23 +2351,6 @@ function LocationForm({ item, initialSector = "", locations, team, sectors, savi
       responsible_user_id: "",
       cleaning_type: "Estrutural",
     }));
-    setAddingCleaningType(false);
-    setNewCleaningType("");
-  }
-  function addCleaningType(event) {
-    event.preventDefault();
-    const name = newCleaningType.trim();
-    if (name.length < 2) {
-      setError("Informe um tipo de limpeza com pelo menos 2 caracteres.");
-      return;
-    }
-    const existingType = cleaningTypeOptions.find((type) => type.toLocaleLowerCase("pt-BR") === name.toLocaleLowerCase("pt-BR"));
-    const selectedType = existingType || name;
-    if (!existingType) setCustomCleaningTypes((current) => [...current, { sector, name }]);
-    change("cleaning_type", selectedType);
-    setNewCleaningType("");
-    setAddingCleaningType(false);
-    setError("");
   }
   function toggleDay(day) {
     setValues((current) => ({
@@ -2416,7 +2383,7 @@ function LocationForm({ item, initialSector = "", locations, team, sectors, savi
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} allowCamera />
       <div className="form-row">
         <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => changeSector(event.target.value)}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><div className="field-with-action"><select id="location-cleaning-type" required disabled={!sector} value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)}><option value="">Selecione um tipo</option>{cleaningTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}</select><button type="button" className="icon-button field-add-button" disabled={!sector} onClick={() => { setAddingCleaningType((current) => !current); setError(""); }} aria-label="Adicionar tipo de limpeza" title="Adicionar tipo de limpeza"><Plus size={17} /></button></div>{addingCleaningType && <div className="inline-type-form"><input aria-label="Novo tipo de limpeza" minLength={2} maxLength={80} placeholder="Ex.: Terminal, profunda" value={newCleaningType} onChange={(event) => setNewCleaningType(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") addCleaningType(event); }} /><button type="button" className="button-secondary" disabled={newCleaningType.trim().length < 2} onClick={addCleaningType}><Plus size={15} />Adicionar tipo</button></div>}<small className="field-hint">Os tipos disponíveis acompanham o setor selecionado.</small></div>
+        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><select id="location-cleaning-type" required disabled={!sector} value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)}><option value="">Selecione um tipo</option>{cleaningTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}</select></div>
       </div>
       <div className="form-field"><label htmlFor="location-name">A ser limpo <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Chão, paredes, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
       <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
@@ -2450,13 +2417,10 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
   const status = values.photo_before && values.photo_after ? "Limpo" : "Não limpo";
   const sectorOptions = [...new Set(locations.map((location) => location.responsible_sector).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "pt-BR"));
-  const typeOptions = [...new Set(locations
-    .filter((location) => !sector || sameSector(location.responsible_sector, sector))
-    .map((location) => location.cleaning_type || "Estrutural"))]
-    .sort((left, right) => left.localeCompare(right, "pt-BR"));
+  const typeOptions = ["Utensílios", "Equipamento", "Estrutural"];
   const itemOptions = locations.filter((location) =>
     (!sector || sameSector(location.responsible_sector, sector))
-      && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
+    && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
   async function submit(event) {

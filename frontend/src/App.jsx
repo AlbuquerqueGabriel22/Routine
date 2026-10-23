@@ -1654,11 +1654,88 @@ function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
   </Modal>;
 }
 
+function PhotoLightbox({ photo, label, onClose }) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="photo-lightbox-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={label || "Visualizar foto"}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="photo-lightbox-container">
+        <header className="photo-lightbox-header">
+          <div className="photo-lightbox-title">
+            <span className="photo-lightbox-badge">{label || "Foto"}</span>
+          </div>
+          <div className="photo-lightbox-actions">
+            <a
+              href={photo}
+              target="_blank"
+              rel="noreferrer"
+              className="photo-lightbox-action-btn"
+              title="Abrir imagem original"
+            >
+              <ArrowUpRight size={15} />
+              <span>Original</span>
+            </a>
+            <button
+              type="button"
+              className="photo-lightbox-close-btn"
+              onClick={onClose}
+              aria-label="Sair da foto"
+              title="Sair da foto (Esc)"
+            >
+              <X size={18} />
+              <span>Sair</span>
+            </button>
+          </div>
+        </header>
+
+        <div
+          className="photo-lightbox-body"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
+        >
+          <img
+            src={photo}
+            alt={label || "Foto ampliada"}
+            className="photo-lightbox-image"
+          />
+        </div>
+
+        <footer className="photo-lightbox-footer">
+          <span className="photo-lightbox-hint">Toque fora da foto ou clique no botão para sair</span>
+          <button
+            type="button"
+            className="button-secondary photo-lightbox-exit-btn"
+            onClick={onClose}
+          >
+            <X size={16} /> Sair da foto
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function CameraPhotoField({ label, photo, onChange }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [error, setError] = useState("");
+  const [previewOpen, setPreviewOpen] = useState(false);
   const preview = useMemo(() => photo ? URL.createObjectURL(photo) : "", [photo]);
   useEffect(() => () => {
     if (preview) URL.revokeObjectURL(preview);
@@ -1720,7 +1797,23 @@ function CameraPhotoField({ label, photo, onChange }) {
     {cameraOpen
       ? <div className="camera-preview"><video ref={videoRef} autoPlay playsInline muted /><button type="button" className="button-primary" onClick={capture}><Camera size={16} /> Capturar</button><button type="button" className="button-secondary" onClick={() => { setCameraOpen(false); stopCamera(); }}>Cancelar câmera</button></div>
       : photo
-        ? <div className="captured-photo"><img src={preview} alt={`${label} capturada`} /><div><span>Foto capturada</span><button type="button" className="button-secondary" onClick={() => onChange(null)}>Excluir foto</button><button type="button" className="button-secondary" onClick={openCamera}>Tirar novamente</button></div></div>
+        ? <>
+            <div className="captured-photo">
+              <button
+                type="button"
+                className="captured-photo-btn"
+                onClick={() => setPreviewOpen(true)}
+                title="Toque para ampliar a foto"
+              >
+                <img src={preview} alt={`${label} capturada`} />
+                <span className="captured-photo-badge"><ArrowUpRight size={12} /> Ampliar</span>
+              </button>
+              <div><span>Foto capturada</span><button type="button" className="button-secondary" onClick={() => onChange(null)}>Excluir foto</button><button type="button" className="button-secondary" onClick={openCamera}>Tirar novamente</button></div>
+            </div>
+            {previewOpen && preview && (
+              <PhotoLightbox photo={preview} label={label} onClose={() => setPreviewOpen(false)} />
+            )}
+          </>
         : <button type="button" className="camera-open" onClick={openCamera}><Camera size={21} /><strong>Abrir câmera</strong><small>Use a câmera para capturar a foto</small></button>}
     {error && <span className="field-error">{error}</span>}
   </div>;
@@ -2475,82 +2568,6 @@ function RecordDialog({ item, onClose, onDelete }) {
       <footer className="modal-footer">{item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
-}
-
-function PhotoLightbox({ photo, label, onClose }) {
-  useEffect(() => {
-    function onKeyDown(event) {
-      if (event.key === "Escape") onClose();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
-
-  return (
-    <div
-      className="photo-lightbox-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-label={label || "Visualizar foto"}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="photo-lightbox-container">
-        <header className="photo-lightbox-header">
-          <div className="photo-lightbox-title">
-            <span className="photo-lightbox-badge">{label || "Foto"}</span>
-          </div>
-          <div className="photo-lightbox-actions">
-            <a
-              href={photo}
-              target="_blank"
-              rel="noreferrer"
-              className="photo-lightbox-action-btn"
-              title="Abrir imagem original"
-            >
-              <ArrowUpRight size={15} />
-              <span>Original</span>
-            </a>
-            <button
-              type="button"
-              className="photo-lightbox-close-btn"
-              onClick={onClose}
-              aria-label="Sair da foto"
-              title="Sair da foto (Esc)"
-            >
-              <X size={18} />
-              <span>Sair</span>
-            </button>
-          </div>
-        </header>
-
-        <div
-          className="photo-lightbox-body"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) onClose();
-          }}
-        >
-          <img
-            src={photo}
-            alt={label || "Foto ampliada"}
-            className="photo-lightbox-image"
-          />
-        </div>
-
-        <footer className="photo-lightbox-footer">
-          <span className="photo-lightbox-hint">Toque fora da foto ou clique no botão para sair</span>
-          <button
-            type="button"
-            className="button-secondary photo-lightbox-exit-btn"
-            onClick={onClose}
-          >
-            <X size={16} /> Sair da foto
-          </button>
-        </footer>
-      </div>
-    </div>
-  );
 }
 
 function PhotoView({ label, photo }) {

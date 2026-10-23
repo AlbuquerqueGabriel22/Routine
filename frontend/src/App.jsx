@@ -2477,20 +2477,144 @@ function RecordDialog({ item, onClose, onDelete }) {
   </Modal>;
 }
 
+function PhotoLightbox({ photo, label, onClose }) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="photo-lightbox-backdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-label={label || "Visualizar foto"}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="photo-lightbox-container">
+        <header className="photo-lightbox-header">
+          <div className="photo-lightbox-title">
+            <span className="photo-lightbox-badge">{label || "Foto"}</span>
+          </div>
+          <div className="photo-lightbox-actions">
+            <a
+              href={photo}
+              target="_blank"
+              rel="noreferrer"
+              className="photo-lightbox-action-btn"
+              title="Abrir imagem original"
+            >
+              <ArrowUpRight size={15} />
+              <span>Original</span>
+            </a>
+            <button
+              type="button"
+              className="photo-lightbox-close-btn"
+              onClick={onClose}
+              aria-label="Sair da foto"
+              title="Sair da foto (Esc)"
+            >
+              <X size={18} />
+              <span>Sair</span>
+            </button>
+          </div>
+        </header>
+
+        <div
+          className="photo-lightbox-body"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) onClose();
+          }}
+        >
+          <img
+            src={photo}
+            alt={label || "Foto ampliada"}
+            className="photo-lightbox-image"
+          />
+        </div>
+
+        <footer className="photo-lightbox-footer">
+          <span className="photo-lightbox-hint">Toque fora da foto ou clique no botão para sair</span>
+          <button
+            type="button"
+            className="button-secondary photo-lightbox-exit-btn"
+            onClick={onClose}
+          >
+            <X size={16} /> Sair da foto
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 function PhotoView({ label, photo }) {
-  return <div className="photo-view"><span className="photo-label">{label}</span>{photo ? <a href={photo} target="_blank" rel="noreferrer"><img src={photo} alt={label} /><span>Ampliar foto <ArrowUpRight size={13} /></span></a> : <div className="no-photo"><ImagePlus size={22} /><span>Sem foto</span></div>}</div>;
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="photo-view">
+        <span className="photo-label">{label}</span>
+        {photo ? (
+          <button
+            type="button"
+            className="photo-view-button"
+            onClick={() => setOpen(true)}
+            title="Clique para visualizar a foto ampliada"
+          >
+            <img src={photo} alt={label} />
+            <span>
+              Ampliar foto <ArrowUpRight size={13} />
+            </span>
+          </button>
+        ) : (
+          <div className="no-photo">
+            <ImagePlus size={22} />
+            <span>Sem foto</span>
+          </div>
+        )}
+      </div>
+      {open && photo && (
+        <PhotoLightbox photo={photo} label={label} onClose={() => setOpen(false)} />
+      )}
+    </>
+  );
 }
 
 function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, isBoss }) {
-  return <Modal title={item.name} subtitle="DETALHES DO ITEM DE LIMPEZA" onClose={onClose} wide>
-    <div className="location-detail-content">
-      {item.photo && <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />}
-      <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time, item.frequency, item.month_week, item.alternate_weeks)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
-      <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
-      {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
-      <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar item</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
-    </div>
-  </Modal>;
+  const [coverOpen, setCoverOpen] = useState(false);
+  return (
+    <>
+      <Modal title={item.name} subtitle="DETALHES DO ITEM DE LIMPEZA" onClose={onClose} wide>
+        <div className="location-detail-content">
+          {item.photo && (
+            <button
+              type="button"
+              className="detail-cover-button"
+              onClick={() => setCoverOpen(true)}
+              title="Clique para ampliar a foto"
+            >
+              <img className="detail-cover" src={item.photo} alt={`Foto de ${item.name}`} />
+              <span className="cover-zoom-badge">
+                <ArrowUpRight size={13} /> Ampliar foto
+              </span>
+            </button>
+          )}
+          <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time, item.frequency, item.month_week, item.alternate_weeks)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
+          <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
+          {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
+          <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar item</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
+        </div>
+      </Modal>
+      {coverOpen && item.photo && (
+        <PhotoLightbox photo={item.photo} label={`Foto: ${item.name}`} onClose={() => setCoverOpen(false)} />
+      )}
+    </>
+  );
 }
 
 export default App;

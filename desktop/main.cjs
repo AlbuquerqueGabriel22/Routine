@@ -107,28 +107,28 @@ if (!gotLock) {
     });
   }
 
-  async function waitForApi(baseUrl) {
+  async function waitForApi(baseUrl, maxWaitMs = 60_000) {
     const healthUrl = `${baseUrl}/api/health`;
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + maxWaitMs;
     let lastError;
     while (Date.now() < deadline) {
       if (apiProcess && apiProcess.exitCode !== null) {
         throw new Error(`O servidor local fechou durante a inicialização (código ${apiProcess.exitCode}).`);
       }
       try {
-        const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1500) });
-        if (response.ok && (await response.json()).status === "ok") return;
+        const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1200) });
+        if (response.ok && (await response.json()).status === "ok") return true;
       } catch (error) {
         lastError = error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`A API não ficou pronta em 60 segundos.${lastError ? `\n${lastError.message}` : ""}`);
+    throw new Error(`Servidor não respondeu dentro do tempo limite.${lastError ? `\n${lastError.message}` : ""}`);
   }
 
   async function createMainWindow() {
     mainWindow = new BrowserWindow({
-      title: "Routine 3.1",
+      title: "Routine 3.4",
       width: 1440,
       height: 920,
       minWidth: 900,
@@ -155,7 +155,26 @@ if (!gotLock) {
       }
       return { action: "deny" };
     });
-    await mainWindow.loadURL(`${appBaseUrl}/`);
+
+    mainWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
+      // If remote load fails due to no internet, try fallback to local bundled dist
+      const { staticDir } = getServerPaths();
+      const localIndexPath = path.join(staticDir, "index.html");
+      if (fs.existsSync(localIndexPath)) {
+        mainWindow.loadFile(localIndexPath).catch(() => {});
+      }
+    });
+
+    try {
+      await mainWindow.loadURL(`${appBaseUrl}/`);
+    } catch {
+      const { staticDir } = getServerPaths();
+      const localIndexPath = path.join(staticDir, "index.html");
+      if (fs.existsSync(localIndexPath)) {
+        await mainWindow.loadFile(localIndexPath);
+      }
+    }
+
     mainWindow.on("closed", () => {
       mainWindow = null;
     });
@@ -181,11 +200,16 @@ if (!gotLock) {
     try {
       appBaseUrl = getConfiguredServerUrl();
       if (appBaseUrl) {
-        await waitForApi(appBaseUrl);
+        try {
+          await waitForApi(appBaseUrl, 2500);
+        } catch {
+          // If remote server is offline or no internet, do not quit: open in offline mode!
+          console.warn("Servidor remoto não respondeu na inicialização. Abrindo em modo offline...");
+        }
       } else {
         serverPort = await findAvailablePort();
         startApi(serverPort);
-        await waitForApi(appBaseUrl);
+        await waitForApi(appBaseUrl, 30_000);
       }
       session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
         const allowed = permission === "media"

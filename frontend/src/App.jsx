@@ -36,8 +36,21 @@ import {
   Sun,
   Trash2,
   Users,
+  Wifi,
+  WifiOff,
+  RefreshCw,
   X,
 } from "lucide-react";
+import {
+  saveAuthSession,
+  getAuthSession,
+  clearAuthSession,
+  saveCache,
+  getCache,
+  saveOfflinePhoto,
+  addToOutbox,
+} from "./offline/db";
+import { syncManager } from "./offline/syncManager";
 
 const FREQUENCIES = ["Diário", "Semanal", "Quinzenal", "Mensal"];
 const SCHEDULE_FREQUENCIES = ["Diário", "Semanal", "Mensal"];
@@ -178,9 +191,22 @@ function App() {
 
   useEffect(() => {
     api("/auth/me")
-      .then(setAccount)
-      .catch((error) => {
-        if (error.status !== 401) setAuthError(error.message);
+      .then((accountData) => {
+        setAccount(accountData);
+        saveAuthSession(accountData);
+      })
+      .catch(async (error) => {
+        if (error.status === 401) {
+          await clearAuthSession();
+        } else {
+          // Check for saved offline session when network fails
+          const cachedSession = await getAuthSession();
+          if (cachedSession) {
+            setAccount(cachedSession);
+            return;
+          }
+          setAuthError(error.message);
+        }
       })
       .finally(() => setAuthLoading(false));
   }, []);
@@ -202,7 +228,10 @@ function App() {
   async function logout() {
     try {
       await api("/auth/logout", { method: "POST" });
+    } catch (error) {
+      console.warn("Logout executado offline:", error);
     } finally {
+      await clearAuthSession();
       setAccount(null);
     }
   }
@@ -220,7 +249,11 @@ function App() {
   if (!account) {
     return <AuthPage
       initialError={authError}
-      onAuthenticated={(nextAccount) => { setAuthError(""); setAccount(nextAccount); }}
+      onAuthenticated={(nextAccount) => {
+        setAuthError("");
+        setAccount(nextAccount);
+        saveAuthSession(nextAccount);
+      }}
     />;
   }
   return <Workspace account={account} onLogout={logout} installPrompt={installPrompt} onInstall={installApp} />;
@@ -269,6 +302,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       && task.missed_at && !task.missed_acknowledged_at) || null
     : null;
 
+  const [syncState, setSyncState] = useState(syncManager.getState());
+
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = appearance.theme;
@@ -299,16 +334,52 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       setSectors(sectorRows);
       setTasks(taskRows);
       setNotifications(notificationRows);
+
+      // Save snapshots to local IndexedDB
+      void Promise.all([
+        saveCache("locations", locationRows),
+        saveCache("history", historyRows),
+        saveCache("dashboard", dashboardData),
+        saveCache("team", teamRows),
+        saveCache("tasks", taskRows),
+        saveCache("notifications", notificationRows),
+        saveCache("sectors", sectorRows),
+      ]);
     } catch (error) {
       if (error.status === 401) {
         await onLogout();
         return;
       }
-      setPageError(error.message);
+      // Offline fallback: load cached data from IndexedDB
+      const [cLocations, cHistory, cDashboard, cTeam, cTasks, cNotifications, cSectors] = await Promise.all([
+        getCache("locations"),
+        getCache("history"),
+        getCache("dashboard"),
+        getCache("team"),
+        getCache("tasks"),
+        getCache("notifications"),
+        getCache("sectors"),
+      ]);
+      if (cLocations || cTasks || cDashboard) {
+        if (cLocations) setLocations(cLocations);
+        if (cHistory) setHistory(cHistory);
+        if (cDashboard) setDashboard(cDashboard);
+        if (cTeam) setTeam(cTeam);
+        if (cTasks) setTasks(cTasks);
+        if (cNotifications) setNotifications(cNotifications);
+        if (cSectors) setSectors(cSectors);
+      } else {
+        setPageError(error.message);
+      }
     } finally {
       setLoading(false);
     }
   }, [isBoss, onLogout]);
+
+  useEffect(() => {
+    syncManager.setApiClient(api, refresh);
+    return syncManager.subscribe(setSyncState);
+  }, [refresh]);
 
   useEffect(() => {
     refresh();
@@ -332,6 +403,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   useEffect(() => {
     const timer = window.setInterval(async () => {
+      if (!syncState.isOnline) return;
       try {
         const [taskRows, notificationRows] = await Promise.all([
           api("/tasks"),
@@ -341,11 +413,10 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
         setNotifications(notificationRows);
       } catch (error) {
         if (error.status === 401) await onLogout();
-        else setPageError(error.message);
       }
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [isBoss, onLogout]);
+  }, [isBoss, onLogout, syncState.isOnline]);
 
   useEffect(() => {
     function focusSearch(event) {
@@ -360,7 +431,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   useEffect(() => {
     if (!toast) return undefined;
-    const timer = window.setTimeout(() => setToast(""), 3200);
+    const timer = window.setTimeout(() => setToast(""), 3500);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -385,10 +456,35 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     setSaving(true);
     try {
       const method = id ? "PUT" : "POST";
-      await api(id ? `/locations/${id}` : "/locations", { method, body: JSON.stringify(values) });
+      const endpoint = id ? `/locations/${id}` : "/locations";
+
+      if (syncState.isOnline) {
+        try {
+          await api(endpoint, { method, body: JSON.stringify(values) });
+          setModal(null);
+          setToast(id ? "Local atualizado." : "Local cadastrado.");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      // Offline flow
+      await addToOutbox({
+        type: id ? "LOCATION_UPDATE" : "LOCATION_CREATE",
+        endpoint,
+        method,
+        payload: values,
+      });
+      const updatedLocations = id
+        ? locations.map((loc) => loc.id === id ? { ...loc, ...values } : loc)
+        : [{ ...values, id: `offline_${Date.now()}` }, ...locations];
+      setLocations(updatedLocations);
+      await saveCache("locations", updatedLocations);
+      await syncManager.updatePendingCount();
       setModal(null);
-      setToast(id ? "Local atualizado." : "Local cadastrado.");
-      await refresh();
+      setToast("Local salvo offline. Será sincronizado ao conectar à internet.");
     } catch (error) {
       setToast(error.message);
     } finally {
@@ -399,13 +495,47 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   async function saveCleaning(values, id) {
     setSaving(true);
     try {
-      await api("/history", {
+      if (syncState.isOnline) {
+        try {
+          await api("/history", {
+            method: "POST",
+            body: JSON.stringify(values),
+          });
+          setModal(null);
+          setToast("Limpeza registrada.");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      // Offline flow
+      await addToOutbox({
+        type: "HISTORY_CREATE",
+        endpoint: "/history",
         method: "POST",
-        body: JSON.stringify(values),
+        payload: values,
       });
+      const loc = locations.find((l) => l.id === Number(values.location_id));
+      const newEntry = {
+        id: `offline_${Date.now()}`,
+        location_id: values.location_id,
+        location_name: loc?.name || "Item de limpeza",
+        cleaning_date: values.cleaning_date || localDateValue(new Date()),
+        cleaning_type: values.cleaning_type || "Estrutural",
+        status: values.status || "Limpo",
+        notes: values.notes || "",
+        responsible: loc?.responsible || account.name || account.login,
+        created_by_name: account.name || account.login,
+        created_at: new Date().toISOString(),
+      };
+      const updatedHistory = [newEntry, ...history];
+      setHistory(updatedHistory);
+      await saveCache("history", updatedHistory);
+      await syncManager.updatePendingCount();
       setModal(null);
-      setToast("Limpeza registrada.");
-      await refresh();
+      setToast("Limpeza salva offline. Será enviada assim que conectar à internet.");
     } catch (error) {
       setToast(error.message);
     } finally {
@@ -416,13 +546,39 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   async function saveTask(values, id) {
     setSaving(true);
     try {
-      await api(id ? `/tasks/${id}` : "/tasks", {
-        method: id ? "PUT" : "POST",
-        body: JSON.stringify(values),
+      const method = id ? "PUT" : "POST";
+      const endpoint = id ? `/tasks/${id}` : "/tasks";
+
+      if (syncState.isOnline) {
+        try {
+          await api(endpoint, {
+            method,
+            body: JSON.stringify(values),
+          });
+          setModal(null);
+          setToast(id ? "Demanda atualizada." : "Tarefa criada e atribuída.");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      // Offline flow
+      await addToOutbox({
+        type: id ? "TASK_UPDATE" : "TASK_CREATE",
+        endpoint,
+        method,
+        payload: values,
       });
+      const updatedTasks = id
+        ? tasks.map((t) => t.id === id ? { ...t, ...values } : t)
+        : [{ ...values, id: `offline_${Date.now()}` }, ...tasks];
+      setTasks(updatedTasks);
+      await saveCache("tasks", updatedTasks);
+      await syncManager.updatePendingCount();
       setModal(null);
-      setToast(id ? "Demanda atualizada." : "Tarefa criada e atribuída.");
-      await refresh();
+      setToast("Tarefa salva offline. Será enviada assim que conectar à internet.");
     } catch (error) {
       throw error;
     } finally {
@@ -433,12 +589,34 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   async function acknowledgeTask(task) {
     setAcknowledgmentError("");
     try {
-      const result = await api(`/tasks/${task.id}/acknowledge`, { method: "POST" });
-      setTasks((current) => current.map((item) => item.id === task.id
-        ? { ...item, acknowledged_at: result.acknowledged_at }
-        : item));
-      setToast("Ciência registrada.");
-      await refresh();
+      if (syncState.isOnline) {
+        try {
+          const result = await api(`/tasks/${task.id}/acknowledge`, { method: "POST" });
+          setTasks((current) => current.map((item) => item.id === task.id
+            ? { ...item, acknowledged_at: result.acknowledged_at }
+            : item));
+          setToast("Ciência registrada.");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      // Offline flow
+      const nowIso = new Date().toISOString();
+      await addToOutbox({
+        type: "TASK_ACKNOWLEDGE",
+        endpoint: `/tasks/${task.id}/acknowledge`,
+        method: "POST",
+        payload: {},
+        taskId: task.id,
+      });
+      const updated = tasks.map((item) => item.id === task.id ? { ...item, acknowledged_at: nowIso } : item);
+      setTasks(updated);
+      await saveCache("tasks", updated);
+      await syncManager.updatePendingCount();
+      setToast("Ciência registrada offline. Será enviada ao conectar à internet.");
     } catch (error) {
       setAcknowledgmentError(error.message);
     }
@@ -447,19 +625,43 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   async function acknowledgeMissedTask(task, notes) {
     setSaving(true);
     try {
-      const result = await api(`/tasks/${task.id}/missed-acknowledge`, {
-        method: "POST",
-        body: JSON.stringify({ notes }),
-      });
-      setTasks((current) => current.map((item) => item.id === task.id
-        ? {
-          ...item,
-          missed_notes: result.missed_notes,
-          missed_acknowledged_at: result.missed_acknowledged_at,
+      if (syncState.isOnline) {
+        try {
+          const result = await api(`/tasks/${task.id}/missed-acknowledge`, {
+            method: "POST",
+            body: JSON.stringify({ notes }),
+          });
+          setTasks((current) => current.map((item) => item.id === task.id
+            ? {
+              ...item,
+              missed_notes: result.missed_notes,
+              missed_acknowledged_at: result.missed_acknowledged_at,
+            }
+            : item));
+          setToast("Resposta registrada.");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
         }
-        : item));
-      setToast("Resposta registrada.");
-      await refresh();
+      }
+
+      // Offline flow
+      const nowIso = new Date().toISOString();
+      await addToOutbox({
+        type: "TASK_MISSED_ACKNOWLEDGE",
+        endpoint: `/tasks/${task.id}/missed-acknowledge`,
+        method: "POST",
+        payload: { notes },
+        taskId: task.id,
+      });
+      const updated = tasks.map((item) => item.id === task.id
+        ? { ...item, missed_notes: notes, missed_acknowledged_at: nowIso }
+        : item);
+      setTasks(updated);
+      await saveCache("tasks", updated);
+      await syncManager.updatePendingCount();
+      setToast("Resposta salva offline. Será enviada ao conectar à internet.");
     } finally {
       setSaving(false);
     }
@@ -468,30 +670,87 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   async function completeTask(task, completion) {
     setSaving(true);
     try {
-      const [beforeUpload, afterUpload] = await Promise.all([
-        uploadCapturedPhoto(completion.photo_before),
-        uploadCapturedPhoto(completion.photo_after),
+      if (syncState.isOnline) {
+        try {
+          const [beforeUpload, afterUpload] = await Promise.all([
+            uploadCapturedPhoto(completion.photo_before),
+            uploadCapturedPhoto(completion.photo_after),
+          ]);
+          const result = await api(`/tasks/${task.id}/complete`, {
+            method: "POST",
+            body: JSON.stringify({
+              photo_before: beforeUpload.url,
+              photo_after: afterUpload.url,
+              notes: completion.notes,
+            }),
+          });
+          setTasks((current) => current.map((item) => item.id === task.id
+            ? {
+              ...item,
+              completed_at: result.completed_at,
+              photo_before: beforeUpload.url,
+              photo_after: afterUpload.url,
+              completion_notes: completion.notes,
+            }
+            : item));
+          setModal(null);
+          setToast("Tarefa concluída!");
+          await refresh();
+          return;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      // Offline flow: store captured photos in IndexedDB and queue outbox
+      const [savedBefore, savedAfter] = await Promise.all([
+        saveOfflinePhoto(completion.photo_before),
+        saveOfflinePhoto(completion.photo_after),
       ]);
-      const result = await api(`/tasks/${task.id}/complete`, {
+
+      await addToOutbox({
+        type: "TASK_COMPLETE",
+        endpoint: `/tasks/${task.id}/complete`,
         method: "POST",
-        body: JSON.stringify({
-          photo_before: beforeUpload.url,
-          photo_after: afterUpload.url,
-          notes: completion.notes,
-        }),
+        payload: { notes: completion.notes },
+        photoBeforeId: savedBefore.id,
+        photoAfterId: savedAfter.id,
+        taskId: task.id,
       });
-      setTasks((current) => current.map((item) => item.id === task.id
+
+      const nowIso = new Date().toISOString();
+      const updatedTasks = tasks.map((item) => item.id === task.id
         ? {
           ...item,
-          completed_at: result.completed_at,
-          photo_before: beforeUpload.url,
-          photo_after: afterUpload.url,
+          completed_at: nowIso,
+          photo_before: savedBefore.dataUrl,
+          photo_after: savedAfter.dataUrl,
           completion_notes: completion.notes,
         }
-        : item));
+        : item);
+      setTasks(updatedTasks);
+      await saveCache("tasks", updatedTasks);
+
+      const newHistoryEntry = {
+        id: `offline_${Date.now()}`,
+        cleaning_date: localDateValue(new Date()),
+        location_name: task.title || task.location_name,
+        cleaning_type: task.cleaning_type || "Geral",
+        status: "Limpo",
+        notes: completion.notes || "Concluído offline",
+        responsible: account.name || account.login,
+        created_by_name: account.name || account.login,
+        created_at: nowIso,
+        photo_before: savedBefore.dataUrl,
+        photo_after: savedAfter.dataUrl,
+      };
+      const updatedHistory = [newHistoryEntry, ...history];
+      setHistory(updatedHistory);
+      await saveCache("history", updatedHistory);
+
+      await syncManager.updatePendingCount();
       setModal(null);
-      setToast("Tarefa concluída.");
-      await refresh();
+      setToast("Tarefa concluída offline! Salva com segurança e será sincronizada assim que conectar ao Wi-Fi.");
     } catch (error) {
       setToast(error.message);
     } finally {
@@ -508,10 +767,21 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   async function readNotification(notification) {
     try {
-      await api(`/notifications/${notification.id}/read`, { method: "POST" });
       setNotifications((current) => current.map((item) => item.id === notification.id
         ? { ...item, read_at: new Date().toISOString() }
         : item));
+
+      if (syncState.isOnline) {
+        await api(`/notifications/${notification.id}/read`, { method: "POST" });
+      } else {
+        await addToOutbox({
+          type: "NOTIFICATION_READ",
+          endpoint: `/notifications/${notification.id}/read`,
+          method: "POST",
+          payload: {},
+        });
+        await syncManager.updatePendingCount();
+      }
     } catch (error) {
       setPageError(error.message);
     }
@@ -599,6 +869,19 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               {query && <button type="button" className="search-clear" onClick={() => setQuery("")} aria-label="Limpar busca"><X size={14} /></button>}
               {!query && <kbd>⌘ K</kbd>}
             </label>
+            <div
+              className={`connection-pill ${syncState.isOnline ? "online" : "offline"}`}
+              title={syncState.isOnline ? "Conectado ao servidor" : "Operando em modo offline"}
+              onClick={() => syncManager.checkServerAndSync()}
+            >
+              {syncState.isSyncing ? (
+                <><RefreshCw size={13} className="spin" /><span>Sincronizando…</span></>
+              ) : syncState.isOnline ? (
+                <><span className="connection-dot online" /><span>Online</span></>
+              ) : (
+                <><WifiOff size={13} /><span>Offline {syncState.pendingCount > 0 ? `(${syncState.pendingCount})` : ""}</span></>
+              )}
+            </div>
             <button className="sync-button" onClick={refresh} disabled={loading} title="Atualizar dados">
               <LoaderCircle size={16} className={loading ? "spin" : ""} />
               <span>Atualizar</span>
@@ -650,6 +933,11 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
             </div>
           </div>
         </header>
+
+        <OfflineSyncBanner
+          syncState={syncState}
+          onTriggerSync={() => syncManager.checkServerAndSync()}
+        />
 
         <div className="page-content">
           {pageError && <div className="error-banner"><CircleAlert size={18} /><span>{pageError} Verifique se a API Python está em execução.</span><button onClick={refresh}>Tentar novamente</button></div>}
@@ -2631,6 +2919,65 @@ function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, 
         <PhotoLightbox photo={item.photo} label={`Foto: ${item.name}`} onClose={() => setCoverOpen(false)} />
       )}
     </>
+  );
+}
+
+function OfflineSyncBanner({ syncState, onTriggerSync }) {
+  if (syncState.isOnline && syncState.pendingCount === 0 && !syncState.isSyncing && !syncState.lastSyncMessage) {
+    return null;
+  }
+
+  const isOffline = !syncState.isOnline;
+  const isSyncing = syncState.isSyncing;
+  const hasPending = syncState.pendingCount > 0;
+
+  return (
+    <aside
+      className={`offline-sync-banner ${isOffline ? "banner-offline" : isSyncing ? "banner-syncing" : "banner-synced"}`}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="banner-inner">
+        <div className="banner-left">
+          {isOffline ? (
+            <div className="banner-icon-badge offline-badge">
+              <WifiOff size={18} />
+            </div>
+          ) : isSyncing ? (
+            <div className="banner-icon-badge syncing-badge">
+              <RefreshCw size={18} className="spin" />
+            </div>
+          ) : (
+            <div className="banner-icon-badge synced-badge">
+              <CheckCircle2 size={18} />
+            </div>
+          )}
+          <div className="banner-copy">
+            <strong>
+              {isOffline
+                ? `Modo Offline${hasPending ? ` · ${syncState.pendingCount} ação(ões) pendente(s)` : ""}`
+                : isSyncing
+                  ? `Sincronizando com o servidor (${syncState.pendingCount} pendente${syncState.pendingCount === 1 ? "" : "s"})…`
+                  : "Sincronizado com sucesso!"}
+            </strong>
+            <p>
+              {isOffline
+                ? hasPending
+                  ? "As fotos e tarefas foram salvas no seu aparelho. Assim que conectar ao Wi-Fi ou internet, serão enviadas automaticamente para o servidor."
+                  : "Sem conexão com a internet. Você pode consultar e registrar tarefas normalmente: os dados ficam guardados no aparelho."
+                : isSyncing
+                  ? "Transmitindo dados e fotos armazenados offline para o servidor central…"
+                  : syncState.lastSyncMessage || "Todas as alterações offline foram gravadas no servidor central."}
+            </p>
+          </div>
+        </div>
+        {isOffline && (
+          <button type="button" className="banner-retry-btn" onClick={onTriggerSync}>
+            <RefreshCw size={14} /> Verificar conexão
+          </button>
+        )}
+      </div>
+    </aside>
   );
 }
 

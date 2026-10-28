@@ -1,8 +1,8 @@
 {
   "name": "routiner-desktop",
-  "version": "3.3.0",
+  "version": "3.4.0",
   "private": true,
-  "description": "Aplicativo desktop Routine 3.3 para Windows",
+  "description": "Aplicativo desktop Routine 3.4 para Windows",
   "main": "desktop/main.cjs",
   "scripts": {
     "build:web": "npm --prefix frontend run build",
@@ -21,7 +21,7 @@
   },
   "build": {
     "appId": "br.com.routiner.desktop",
-    "productName": "Routine 3.3",
+    "productName": "Routine 3.4",
     "asar": true,
     "directories": {
       "output": "release"
@@ -58,7 +58,7 @@
       "include": "build/installer.nsh",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Routine 3.3"
+      "shortcutName": "Routine 3.4"
     }
   },
   "allowScripts": {
@@ -67,6 +67,7 @@
   },
   "dependencies": {
     "@capacitor/android": "^7.6.9",
-    "@capacitor/core": "^7.6.9"
+    "@capacitor/core": "^7.6.9",
+    "wrap-ansi": "^10.0.2"
   }
 }

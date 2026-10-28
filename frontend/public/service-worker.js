@@ -1,5 +1,12 @@
-const CACHE_NAME = "routiner-shell-v1";
-const SHELL_FILES = ["/", "/manifest.webmanifest", "/routiner.svg", "/icon-192.png", "/icon-512.png"];
+const CACHE_NAME = "routiner-cache-v3";
+const SHELL_FILES = [
+  "/",
+  "/index.html",
+  "/manifest.webmanifest",
+  "/routiner.svg",
+  "/icon-192.png",
+  "/icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -18,25 +25,27 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
-  if (
-    request.method !== "GET"
-    || url.origin !== self.location.origin
-    || url.pathname.startsWith("/api/")
-    || url.pathname.startsWith("/uploads/")
-  ) {
+
+  // Never cache API calls in service worker cache (handled by IndexedDB offline layer)
+  if (url.pathname.startsWith("/api/")) {
     return;
   }
 
+  // Navigation requests (HTML page): Network first, fallback to cached index.html
   if (request.mode === "navigate") {
     event.respondWith(
       (async () => {
         try {
-          const response = await fetch(request);
-          await caches.open(CACHE_NAME).then((cache) => cache.put("/", response.clone()));
-          return response;
+          const networkResponse = await fetch(request);
+          if (networkResponse && networkResponse.ok) {
+            const cache = await caches.open(CACHE_NAME);
+            cache.put("/", networkResponse.clone());
+            cache.put("/index.html", networkResponse.clone());
+          }
+          return networkResponse;
         } catch (error) {
-          const fallback = await caches.match("/");
-          if (fallback) return fallback;
+          const cached = (await caches.match("/")) || (await caches.match("/index.html"));
+          if (cached) return cached;
           throw error;
         }
       })(),
@@ -44,15 +53,55 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (url.pathname.startsWith("/assets/") || url.pathname === "/routiner.svg" || url.pathname === "/manifest.webmanifest") {
+  // Static Assets (JS, CSS, SVGs, Fonts)
+  if (
+    url.pathname.startsWith("/assets/") ||
+    url.pathname === "/routiner.svg" ||
+    url.pathname === "/manifest.webmanifest" ||
+    url.pathname.endsWith(".js") ||
+    url.pathname.endsWith(".css") ||
+    url.pathname.endsWith(".png") ||
+    url.pathname.endsWith(".svg")
+  ) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
         const cached = await cache.match(request);
         if (cached) return cached;
-        const response = await fetch(request);
-        if (response.ok) await cache.put(request, response.clone());
-        return response;
+
+        try {
+          const networkResponse = await fetch(request);
+          if (networkResponse && networkResponse.ok) {
+            cache.put(request, networkResponse.clone());
+          }
+          return networkResponse;
+        } catch (error) {
+          if (cached) return cached;
+          throw error;
+        }
+      })(),
+    );
+    return;
+  }
+
+  // Uploaded images (/uploads/): Cache so previously viewed photos load offline
+  if (url.pathname.startsWith("/uploads/") && request.method === "GET") {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE_NAME);
+        const cached = await cache.match(request);
+        if (cached) return cached;
+
+        try {
+          const response = await fetch(request);
+          if (response && response.ok) {
+            cache.put(request, response.clone());
+          }
+          return response;
+        } catch {
+          if (cached) return cached;
+          return new Response("", { status: 404, statusText: "Offline photo not cached" });
+        }
       })(),
     );
   }

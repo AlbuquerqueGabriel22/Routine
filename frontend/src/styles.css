@@ -1283,3 +1283,213 @@ html[data-theme="dark"] .cal-badge.missed {
   .photo-lightbox-hint { display: none; }
   .photo-lightbox-exit-btn { width: 100%; justify-content: center; }
 }
+
+/* ==================== OFFLINE & SYNC STYLES ==================== */
+
+.connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+
+.connection-pill.online {
+  background: rgba(34, 197, 94, 0.1);
+  color: #16a34a;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.connection-pill.offline {
+  background: rgba(245, 158, 11, 0.12);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  animation: pulse-soft 2s infinite ease-in-out;
+}
+
+.connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.connection-dot.online {
+  background-color: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+
+.offline-sync-banner {
+  margin: 12px 24px 0 24px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  padding: 12px 18px;
+  transition: all 0.25s ease;
+  animation: slide-down 0.25s ease-out;
+}
+
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.offline-sync-banner.banner-offline {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
+.offline-sync-banner.banner-syncing {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.offline-sync-banner.banner-synced {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+[data-theme="dark"] .offline-sync-banner.banner-offline {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+  color: #fbbf24;
+}
+
+[data-theme="dark"] .offline-sync-banner.banner-syncing {
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.3);
+  color: #93c5fd;
+}
+
+[data-theme="dark"] .offline-sync-banner.banner-synced {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #86efac;
+}
+
+.banner-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.banner-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 1;
+  min-width: 240px;
+}
+
+.banner-icon-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.banner-icon-badge.offline-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #d97706;
+}
+
+.banner-icon-badge.syncing-badge {
+  background: rgba(59, 130, 246, 0.2);
+  color: #2563eb;
+}
+
+.banner-icon-badge.synced-badge {
+  background: rgba(34, 197, 94, 0.2);
+  color: #16a34a;
+}
+
+.banner-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.banner-copy strong {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.banner-copy p {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.9;
+  line-height: 1.4;
+}
+
+.banner-retry-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(217, 119, 6, 0.4);
+  background: #ffffff;
+  color: #b45309;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+}
+
+.banner-retry-btn:hover {
+  background: #fef3c7;
+  border-color: #d97706;
+}
+
+[data-theme="dark"] .banner-retry-btn {
+  background: #27272a;
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+}
+
+[data-theme="dark"] .banner-retry-btn:hover {
+  background: #3f3f46;
+}
+
+@media (max-width: 768px) {
+  .offline-sync-banner {
+    margin: 8px 12px 0 12px;
+    padding: 10px 14px;
+  }
+  .banner-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .banner-retry-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}

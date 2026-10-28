@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, session } = require("electron");
-const { spawn } = require("node:child_process");
+const http = require("node:http");
+const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const fs = require("node:fs");
@@ -9,12 +10,28 @@ const DEFAULT_SERVER_URL = "https://routine.taildc7b60.ts.net";
 app.setName("Routiner");
 if (process.platform === "win32") app.setAppUserModelId("br.com.routiner.desktop");
 
+const MIME_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".mjs": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  let apiProcess;
   let mainWindow;
+  let localServer;
   let quitting = false;
   let serverPort;
   let appBaseUrl;
@@ -39,13 +56,11 @@ if (!gotLock) {
   function getServerPaths() {
     if (app.isPackaged) {
       return {
-        executable: path.join(process.resourcesPath, "backend", "routiner-api", "routiner-api.exe"),
         staticDir: path.join(process.resourcesPath, "frontend", "dist"),
       };
     }
     const projectRoot = path.resolve(__dirname, "..");
     return {
-      executable: path.join(projectRoot, "backend", "dist", "routiner-api", "routiner-api.exe"),
       staticDir: path.join(projectRoot, "frontend", "dist"),
     };
   }
@@ -57,73 +72,106 @@ if (!gotLock) {
     const configuredValue = fs.existsSync(configPath)
       ? fs.readFileSync(configPath, "utf8").trim()
       : "";
-    if (!configuredValue) return null;
+    if (!configuredValue) return DEFAULT_SERVER_URL;
 
-    let url;
     try {
-      url = new URL(configuredValue);
-    } catch {
-      throw new Error(`Endereço inválido em ${configPath}. Informe a URL HTTPS do servidor.`);
-    }
-    if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash) {
-      throw new Error(`Endereço inválido em ${configPath}. Informe somente a origem HTTPS, por exemplo https://routiner.exemplo.ts.net.`);
-    }
-    return url.origin;
+      const url = new URL(configuredValue);
+      if (url.protocol === "https:" || url.protocol === "http:") {
+        return url.origin;
+      }
+    } catch {}
+    return DEFAULT_SERVER_URL;
   }
 
-  function startApi(port) {
-    const { executable, staticDir } = getServerPaths();
-    if (!fs.existsSync(executable)) {
-      throw new Error(`Executável da API não encontrado: ${executable}. Gere os arquivos de distribuição novamente.`);
-    }
-    if (!fs.existsSync(path.join(staticDir, "index.html"))) {
-      throw new Error(`Interface do Routiner não encontrada: ${staticDir}. Gere a versão web antes de empacotar.`);
-    }
-
-    const dataDir = path.join(app.getPath("userData"), "data");
-    const uploadsDir = path.join(dataDir, "uploads");
-    fs.mkdirSync(uploadsDir, { recursive: true });
-    apiProcess = spawn(executable, ["--port", String(port)], {
-      cwd: path.dirname(executable),
-      windowsHide: true,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        CLEANING_DB_PATH: path.join(dataDir, "routiner.db"),
-        CLEANING_UPLOAD_DIR: uploadsDir,
-        ROUTINER_AUTH_SECRET_FILE: path.join(dataDir, ".auth_secret"),
-        ROUTINER_STATIC_DIR: staticDir,
-      },
-    });
-    appBaseUrl = `http://127.0.0.1:${port}`;
-
-    apiProcess.once("error", (error) => {
-      if (!quitting) showStartupError(`O servidor local do Routiner não pôde iniciar.\n\n${error.message}`);
-    });
-    apiProcess.once("exit", (code) => {
-      if (!quitting) {
-        showStartupError(`O servidor local do Routiner foi encerrado inesperadamente (código ${code ?? "desconhecido"}). Feche e abra o aplicativo novamente.`);
-      }
-    });
-  }
-
-  async function waitForApi(baseUrl, maxWaitMs = 60_000) {
-    const healthUrl = `${baseUrl}/api/health`;
-    const deadline = Date.now() + maxWaitMs;
-    let lastError;
-    while (Date.now() < deadline) {
-      if (apiProcess && apiProcess.exitCode !== null) {
-        throw new Error(`O servidor local fechou durante a inicialização (código ${apiProcess.exitCode}).`);
-      }
+  function createLocalServer(staticDir, remoteServerUrl) {
+    return http.createServer((req, res) => {
+      let reqUrl;
       try {
-        const response = await fetch(healthUrl, { signal: AbortSignal.timeout(1200) });
-        if (response.ok && (await response.json()).status === "ok") return true;
-      } catch (error) {
-        lastError = error;
+        reqUrl = new URL(req.url, "http://127.0.0.1");
+      } catch {
+        res.writeHead(400);
+        res.end("Bad Request");
+        return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    throw new Error(`Servidor não respondeu dentro do tempo limite.${lastError ? `\n${lastError.message}` : ""}`);
+
+      // Proxy API and Uploads to the remote server
+      if (reqUrl.pathname.startsWith("/api/") || reqUrl.pathname.startsWith("/uploads/")) {
+        const targetUrl = new URL(reqUrl.pathname + reqUrl.search, remoteServerUrl);
+        const isHttps = targetUrl.protocol === "https:";
+        const transport = isHttps ? https : http;
+
+        const proxyHeaders = {
+          ...req.headers,
+          host: targetUrl.host,
+        };
+        if (proxyHeaders.origin) proxyHeaders.origin = targetUrl.origin;
+        if (proxyHeaders.referer) proxyHeaders.referer = targetUrl.href;
+
+        const proxyReq = transport.request(
+          targetUrl,
+          {
+            method: req.method,
+            headers: proxyHeaders,
+            timeout: 3500,
+          },
+          (proxyRes) => {
+            const responseHeaders = { ...proxyRes.headers };
+            // Rewrite cookie security so local 127.0.0.1 accepts the session
+            if (responseHeaders["set-cookie"]) {
+              responseHeaders["set-cookie"] = responseHeaders["set-cookie"].map((cookie) =>
+                cookie.replace(/;\s*Secure/gi, "").replace(/;\s*Domain=[^;]+/gi, "")
+              );
+            }
+            res.writeHead(proxyRes.statusCode, responseHeaders);
+            proxyRes.pipe(res);
+          }
+        );
+
+        proxyReq.on("timeout", () => {
+          proxyReq.destroy();
+          if (!res.headersSent) {
+            res.writeHead(504, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "Tempo limite ao conectar com o servidor." }));
+          }
+        });
+
+        proxyReq.on("error", () => {
+          if (!res.headersSent) {
+            res.writeHead(503, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ detail: "Servidor offline ou sem conexão com a internet." }));
+          }
+        });
+
+        req.pipe(proxyReq);
+        return;
+      }
+
+      // Static file serving from frontend/dist
+      let pathname = decodeURIComponent(reqUrl.pathname);
+      if (pathname === "/") pathname = "/index.html";
+
+      let filePath = path.join(staticDir, pathname);
+
+      // If file doesn't exist, fallback to index.html (SPA routing)
+      if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+        filePath = path.join(staticDir, "index.html");
+      }
+
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("Not Found");
+        return;
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const contentType = MIME_TYPES[ext] || "application/octet-stream";
+
+      res.writeHead(200, {
+        "Content-Type": contentType,
+        "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=31536000",
+      });
+      fs.createReadStream(filePath).pipe(res);
+    });
   }
 
   async function createMainWindow() {
@@ -143,7 +191,9 @@ if (!gotLock) {
         sandbox: true,
       },
     });
+
     mainWindow.once("ready-to-show", () => mainWindow.show());
+
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
       try {
         const target = new URL(url);
@@ -156,24 +206,7 @@ if (!gotLock) {
       return { action: "deny" };
     });
 
-    mainWindow.webContents.on("did-fail-load", (event, errorCode, errorDescription) => {
-      // If remote load fails due to no internet, try fallback to local bundled dist
-      const { staticDir } = getServerPaths();
-      const localIndexPath = path.join(staticDir, "index.html");
-      if (fs.existsSync(localIndexPath)) {
-        mainWindow.loadFile(localIndexPath).catch(() => {});
-      }
-    });
-
-    try {
-      await mainWindow.loadURL(`${appBaseUrl}/`);
-    } catch {
-      const { staticDir } = getServerPaths();
-      const localIndexPath = path.join(staticDir, "index.html");
-      if (fs.existsSync(localIndexPath)) {
-        await mainWindow.loadFile(localIndexPath);
-      }
-    }
+    await mainWindow.loadURL(`${appBaseUrl}/`);
 
     mainWindow.on("closed", () => {
       mainWindow = null;
@@ -191,44 +224,49 @@ if (!gotLock) {
   function showStartupError(message) {
     if (quitting) return;
     quitting = true;
-    if (apiProcess && apiProcess.exitCode === null) apiProcess.kill();
     dialog.showErrorBox("Não foi possível abrir o Routiner", message);
     app.quit();
   }
 
   app.whenReady().then(async () => {
     try {
-      appBaseUrl = getConfiguredServerUrl();
-      if (appBaseUrl) {
-        try {
-          await waitForApi(appBaseUrl, 2500);
-        } catch {
-          // If remote server is offline or no internet, do not quit: open in offline mode!
-          console.warn("Servidor remoto não respondeu na inicialização. Abrindo em modo offline...");
-        }
-      } else {
-        serverPort = await findAvailablePort();
-        startApi(serverPort);
-        await waitForApi(appBaseUrl, 30_000);
+      const { staticDir } = getServerPaths();
+      const indexPath = path.join(staticDir, "index.html");
+      if (!fs.existsSync(indexPath)) {
+        throw new Error(`Interface do Routiner não encontrada em: ${staticDir}. Gere o build antes de iniciar.`);
       }
+
+      const remoteServerUrl = getConfiguredServerUrl();
+
+      serverPort = await findAvailablePort();
+      localServer = createLocalServer(staticDir, remoteServerUrl);
+      await new Promise((resolve, reject) => {
+        localServer.once("error", reject);
+        localServer.listen(serverPort, "127.0.0.1", resolve);
+      });
+
+      appBaseUrl = `http://127.0.0.1:${serverPort}`;
+
       session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
         const allowed = permission === "media"
           && details.mediaTypes?.includes("video")
           && isAppOrigin(details.requestingUrl || "");
         callback(Boolean(allowed));
       });
+
       await createMainWindow();
     } catch (error) {
-      const message = appBaseUrl
-        ? `Não foi possível conectar ao servidor compartilhado (${appBaseUrl}).\n\nVerifique se o servidor Debian está ligado e conectado à internet.\n\n${error.message}`
-        : `O servidor local do Routiner não pôde iniciar.\n\n${error.message}`;
-      showStartupError(message);
+      showStartupError(`O servidor local do Routiner não pôde iniciar.\n\n${error.message}`);
     }
   });
 
   app.on("before-quit", () => {
     quitting = true;
-    if (apiProcess && apiProcess.exitCode === null) apiProcess.kill();
+    if (localServer) {
+      try {
+        localServer.close();
+      } catch {}
+    }
   });
 
   app.on("window-all-closed", () => app.quit());

@@ -176,7 +176,7 @@ if (!gotLock) {
 
   async function createMainWindow() {
     mainWindow = new BrowserWindow({
-      title: "Routine 3.4",
+      title: "Routine 3.4.1",
       width: 1440,
       height: 920,
       minWidth: 900,

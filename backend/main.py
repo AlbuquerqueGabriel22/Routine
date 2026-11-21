@@ -38,7 +38,7 @@ COOKIE_SECURE = os.environ.get("ROUTINER_COOKIE_SECURE", "").lower() == "true"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FREQUENCIES = {"Diário", "Semanal", "Quinzenal", "Mensal"}
-STATUSES = {"Limpo", "Não limpo"}
+STATUSES = {"Pendente", "Iniciado", "Concluído", "Vencido"}
 SCHEDULE_TIMEZONE = ZoneInfo(os.environ.get("ROUTINER_TIMEZONE", "America/Sao_Paulo"))
 PASSWORD_ITERATIONS = 600_000
 SESSION_COOKIE = "routiner_session"
@@ -257,6 +257,9 @@ def initialize_database():
                 photo_before TEXT,
                 photo_after TEXT,
                 notes TEXT NOT NULL DEFAULT '',
+                started_at TEXT,
+                completed_at TEXT,
+                deadline TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS uploads (
@@ -287,6 +290,7 @@ def initialize_database():
                 deadline TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 acknowledged_at TEXT,
+                started_at TEXT,
                 completed_at TEXT,
                 completion_notes TEXT NOT NULL DEFAULT '',
                 photo_before TEXT,
@@ -379,22 +383,39 @@ def initialize_database():
         add_column_if_missing(
             conn, "cleanings", "created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
+        add_column_if_missing(conn, "cleanings", "started_at TEXT")
+        add_column_if_missing(conn, "cleanings", "completed_at TEXT")
+        add_column_if_missing(conn, "cleanings", "deadline TEXT")
         conn.execute(
             """UPDATE cleanings
                 SET status = CASE
                     WHEN NULLIF(trim(photo_before), '') IS NOT NULL
-                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Limpo'
-                    ELSE 'Não limpo'
+                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Concluído'
+                    WHEN NULLIF(trim(photo_before), '') IS NOT NULL THEN 'Iniciado'
+                    ELSE 'Pendente'
                 END
-                WHERE status != CASE
+                WHERE status NOT IN ('Pendente', 'Iniciado', 'Concluído', 'Vencido')
+                    AND status != CASE
                     WHEN NULLIF(trim(photo_before), '') IS NOT NULL
-                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Limpo'
-                    ELSE 'Não limpo'
+                        AND NULLIF(trim(photo_after), '') IS NOT NULL THEN 'Concluído'
+                    WHEN NULLIF(trim(photo_before), '') IS NOT NULL THEN 'Iniciado'
+                    ELSE 'Pendente'
                 END"""
+        )
+        conn.execute(
+            """UPDATE cleanings SET started_at = created_at
+                WHERE started_at IS NULL AND NULLIF(trim(photo_before), '') IS NOT NULL"""
+        )
+        conn.execute(
+            """UPDATE cleanings SET completed_at = created_at
+                WHERE completed_at IS NULL
+                    AND NULLIF(trim(photo_before), '') IS NOT NULL
+                    AND NULLIF(trim(photo_after), '') IS NOT NULL"""
         )
         add_column_if_missing(conn, "tasks", "completion_notes TEXT NOT NULL DEFAULT ''")
         add_column_if_missing(conn, "tasks", "photo_before TEXT")
         add_column_if_missing(conn, "tasks", "photo_after TEXT")
+        add_column_if_missing(conn, "tasks", "started_at TEXT")
         add_column_if_missing(
             conn, "tasks", "completed_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL"
         )
@@ -520,6 +541,12 @@ def process_due_tasks(now: datetime | None = None):
             """UPDATE tasks SET missed_at = deadline
                 WHERE completed_at IS NULL AND missed_at IS NULL
                     AND deleted_at IS NULL AND deadline <= ?""",
+            (current.isoformat(timespec="seconds"),),
+        )
+        conn.execute(
+            """UPDATE cleanings SET status = 'Vencido'
+                WHERE status IN ('Pendente', 'Iniciado')
+                    AND deadline IS NOT NULL AND deadline <= ?""",
             (current.isoformat(timespec="seconds"),),
         )
 
@@ -721,6 +748,23 @@ class CleaningInput(BaseModel):
         return value.strip()
 
 
+class CleaningStartInput(BaseModel):
+    id: Annotated[str, Field(min_length=1, max_length=64)]
+    location_id: str
+    cleaning_date: date
+    photo_before: Annotated[str, Field(min_length=1, max_length=100)]
+    notes: Annotated[str, Field(max_length=1000)] = ""
+
+    @field_validator("notes")
+    @classmethod
+    def clean_notes(cls, value: str) -> str:
+        return value.strip()
+
+
+class CleaningCompletionInput(BaseModel):
+    photo_after: Annotated[str, Field(min_length=1, max_length=100)]
+
+
 class TaskInput(BaseModel):
     assigned_user_id: str
     title: Annotated[str, Field(min_length=2, max_length=120)]
@@ -798,6 +842,10 @@ class TaskCompletionInput(BaseModel):
     @classmethod
     def clean_completion_notes(cls, value: str) -> str:
         return value.strip()
+
+
+class TaskStartInput(BaseModel):
+    photo_before: Annotated[str, Field(min_length=1, max_length=100)]
 
 
 def hash_password(password: str) -> str:
@@ -995,6 +1043,25 @@ def fetch_location(conn: sqlite3.Connection, location_id: str, company_id: str):
     if row is None:
         raise HTTPException(status_code=404, detail="Local não encontrado nesta empresa.")
     return dict(row)
+
+
+def cleaning_deadline(cleaning_date: date, schedule_time: str | None) -> str:
+    due_time = time.fromisoformat(schedule_time or "23:59")
+    deadline_local = datetime.combine(cleaning_date, due_time, tzinfo=SCHEDULE_TIMEZONE)
+    return deadline_local.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def require_uploaded_photo(conn: sqlite3.Connection, photo: str, session: dict) -> None:
+    match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:jpg|png|webp))", photo)
+    if match is None:
+        raise HTTPException(status_code=422, detail="A foto deve ser capturada e enviada pelo aplicativo.")
+    upload = conn.execute(
+        "SELECT owner_user_id FROM uploads WHERE filename = ? AND company_id = ?",
+        (match.group(1), session["company_id"]),
+    ).fetchone()
+    expected_owner = session["account_id"] if session["role"] == "user" else None
+    if upload is None or upload["owner_user_id"] != expected_owner:
+        raise HTTPException(status_code=403, detail="A foto não pertence a esta conta.")
 
 
 def save_location_schedule(
@@ -1674,11 +1741,18 @@ def update_user(user_id: str, payload: UserUpdateInput, session: dict = Depends(
 
 
 @app.get("/api/tasks")
-def list_tasks(session: dict = Depends(current_session)):
+def list_tasks(scope: str = "", session: dict = Depends(current_session)):
+    if scope not in {"", "general", "personal"}:
+        raise HTTPException(status_code=422, detail="Filtro de tarefas inválido.")
     process_due_tasks()
     clauses = ["t.company_id = ?"]
     params: list[str] = [session["company_id"]]
-    if session["role"] == "user":
+    if scope == "personal" and session["role"] == "user":
+        clauses.append("t.assigned_user_id = ?")
+        params.append(session["account_id"])
+    elif scope == "personal":
+        clauses.append("0 = 1")
+    elif session["role"] == "user" and scope != "general":
         clauses.append(
             """lower(trim(u.sector)) = lower(trim((
                 SELECT active_user.sector FROM users active_user
@@ -1871,7 +1945,7 @@ def acknowledge_task(task_id: str, session: dict = Depends(current_session)):
         if task is None or task["assignee_sector"].strip().casefold() != task["current_sector"].strip().casefold():
             raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
         if task["completed_at"] is not None:
-            raise HTTPException(status_code=409, detail="Esta tarefa já foi concluída.")
+            raise HTTPException(status_code=409, detail="Esta tarefa já foi finalizada.")
         if task["missed_at"] is not None:
             raise HTTPException(status_code=409, detail="O prazo desta tarefa venceu; ela está no histórico.")
         if task["acknowledged_at"] is not None:
@@ -1940,6 +2014,82 @@ def acknowledge_missed_task(
     return {"id": task_id, "missed_acknowledged_at": now, "missed_notes": payload.notes}
 
 
+@app.post("/api/tasks/{task_id}/start")
+def start_task(
+    task_id: str,
+    payload: TaskStartInput,
+    session: dict = Depends(current_session),
+):
+    if session["role"] != "user":
+        raise HTTPException(status_code=403, detail="Somente um funcionário pode iniciar a tarefa.")
+    process_due_tasks()
+    match = re.fullmatch(r"/uploads/([a-f0-9]{32}\.(?:jpg|png|webp))", payload.photo_before)
+    if match is None:
+        raise HTTPException(status_code=422, detail="A foto de antes deve ser capturada e enviada pelo aplicativo.")
+    filename = match.group(1)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connection() as conn:
+        task = conn.execute(
+            """SELECT t.assigned_user_id, t.acknowledged_at, t.started_at, t.photo_before,
+                    t.completed_at, t.missed_at, t.deadline,
+                    assigned.sector AS assignee_sector,
+                    active_user.sector AS current_sector
+                FROM tasks t
+                JOIN users assigned ON assigned.id = t.assigned_user_id
+                JOIN users active_user ON active_user.id = ?
+                WHERE t.id = ? AND t.company_id = ? AND t.deleted_at IS NULL
+                    AND assigned.company_id = ? AND active_user.company_id = ?""",
+            (
+                session["account_id"],
+                task_id,
+                session["company_id"],
+                session["company_id"],
+                session["company_id"],
+            ),
+        ).fetchone()
+        if task is None or task["assignee_sector"].strip().casefold() != task["current_sector"].strip().casefold():
+            raise HTTPException(status_code=404, detail="Tarefa não encontrada nesta conta.")
+        if task["completed_at"] is not None:
+            raise HTTPException(status_code=409, detail="Esta tarefa já foi finalizada.")
+        if task["missed_at"] is not None or task["deadline"] <= now:
+            raise HTTPException(status_code=409, detail="O prazo desta tarefa venceu; ela está no histórico.")
+        if task["acknowledged_at"] is None:
+            raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de iniciá-la.")
+        upload = conn.execute(
+            """SELECT 1 FROM uploads
+                WHERE filename = ? AND company_id = ? AND owner_user_id = ?""",
+            (filename, session["company_id"], session["account_id"]),
+        ).fetchone()
+        if upload is None:
+            raise HTTPException(status_code=403, detail="A foto não pertence a esta conta.")
+        if task["started_at"] is not None:
+            return {
+                "id": task_id,
+                "started_at": task["started_at"],
+                "photo_before": task["photo_before"],
+            }
+        cursor = conn.execute(
+            """UPDATE tasks SET started_at = ?, photo_before = ?
+                WHERE id = ? AND company_id = ? AND started_at IS NULL
+                    AND acknowledged_at IS NOT NULL AND completed_at IS NULL
+                    AND missed_at IS NULL AND deleted_at IS NULL AND deadline > ?""",
+            (now, payload.photo_before, task_id, session["company_id"], now),
+        )
+        if cursor.rowcount == 0:
+            current = conn.execute(
+                "SELECT started_at, photo_before FROM tasks WHERE id = ? AND company_id = ?",
+                (task_id, session["company_id"]),
+            ).fetchone()
+            if current is None or current["started_at"] is None:
+                raise HTTPException(status_code=409, detail="A tarefa não pode mais ser iniciada.")
+            return {
+                "id": task_id,
+                "started_at": current["started_at"],
+                "photo_before": current["photo_before"],
+            }
+    return {"id": task_id, "started_at": now, "photo_before": payload.photo_before}
+
+
 @app.post("/api/tasks/{task_id}/complete")
 def complete_task(
     task_id: str,
@@ -1958,7 +2108,8 @@ def complete_task(
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connection() as conn:
         task = conn.execute(
-            """SELECT t.assigned_user_id, t.acknowledged_at, t.completed_at, t.missed_at, t.deadline,
+            """SELECT t.assigned_user_id, t.acknowledged_at, t.started_at, t.photo_before,
+                    t.completed_at, t.missed_at, t.deadline,
                     assigned.sector AS assignee_sector,
                     active_user.sector AS current_sector
                 FROM tasks t
@@ -1982,16 +2133,21 @@ def complete_task(
             raise HTTPException(status_code=409, detail="O prazo desta tarefa venceu; ela está no histórico.")
         if task["acknowledged_at"] is None:
             raise HTTPException(status_code=409, detail="Dê ciência da tarefa antes de concluí-la.")
+        if task["started_at"] is None or payload.photo_before != task["photo_before"]:
+            raise HTTPException(status_code=409, detail="Inicie a tarefa com a foto de antes antes de registrá-la.")
         if task["assigned_user_id"] != session["account_id"] and not payload.notes:
             raise HTTPException(
                 status_code=422,
                 detail="Informe o motivo de outro funcionário executar esta tarefa.",
             )
-        for filename in photo_filenames:
+        for photo_index, filename in enumerate(photo_filenames):
+            owner_clause = "" if photo_index == 0 else " AND owner_user_id = ?"
+            params = (filename, session["company_id"])
+            if photo_index != 0:
+                params += (session["account_id"],)
             upload = conn.execute(
-                """SELECT 1 FROM uploads
-                    WHERE filename = ? AND company_id = ? AND owner_user_id = ?""",
-                (filename, session["company_id"], session["account_id"]),
+                f"SELECT 1 FROM uploads WHERE filename = ? AND company_id = ?{owner_clause}",
+                params,
             ).fetchone()
             if upload is None:
                 raise HTTPException(status_code=403, detail="Uma das fotos não pertence a esta conta.")
@@ -2189,6 +2345,8 @@ def list_locations(
     photo: str = "",
     session: dict = Depends(current_session),
 ):
+    process_due_tasks()
+    today = datetime.now(SCHEDULE_TIMEZONE).date().isoformat()
     clauses = ["l.company_id = ?"]
     params: list[str] = [session["company_id"]]
     if session["role"] == "user":
@@ -2217,6 +2375,19 @@ def list_locations(
                 schedule.id AS schedule_id, schedule.weekdays AS schedule_days,
                 schedule.due_time AS schedule_time, schedule.month_week,
                 schedule.alternate_weeks, schedule.anchor_date,
+                (SELECT CASE
+                    WHEN t.completed_at IS NOT NULL THEN 'Concluído'
+                    WHEN t.missed_at IS NOT NULL THEN 'Vencido'
+                    WHEN t.started_at IS NOT NULL THEN 'Iniciado'
+                    ELSE 'Pendente'
+                END
+                    FROM tasks t
+                    WHERE t.schedule_id = schedule.id AND t.scheduled_for = ?
+                        AND t.deleted_at IS NULL
+                    ORDER BY t.created_at DESC LIMIT 1) AS routine_status,
+                (SELECT c.status FROM cleanings c
+                    WHERE c.location_id = l.id AND c.cleaning_date = ?
+                    ORDER BY c.created_at DESC LIMIT 1) AS manual_today_status,
                 (SELECT COUNT(*) FROM cleanings c WHERE c.location_id = l.id) AS cleaning_count,
                 (SELECT c.cleaning_date FROM cleanings c WHERE c.location_id = l.id
                     ORDER BY c.cleaning_date DESC, c.created_at DESC LIMIT 1) AS last_cleaned,
@@ -2228,7 +2399,7 @@ def list_locations(
             WHERE {' AND '.join(clauses)}
             ORDER BY l.name COLLATE NOCASE
             """,
-            params,
+            [today, today, *params],
         ).fetchall()
     return [dict(row) for row in rows]
 
@@ -2344,14 +2515,22 @@ def list_history(
     location_id: str = "",
     status: str = "",
     search: str = "",
+    scope: str = "",
     date_from: str = Query(default="", alias="from"),
     date_to: str = Query(default="", alias="to"),
     session: dict = Depends(current_session),
 ):
+    if scope not in {"", "general", "personal"}:
+        raise HTTPException(status_code=422, detail="Filtro de histórico inválido.")
     process_due_tasks()
     clauses = ["l.company_id = ?"]
     params: list[str] = [session["company_id"]]
-    if session["role"] == "user":
+    if scope == "personal" and session["role"] == "user":
+        clauses.append("l.responsible_user_id = ?")
+        params.append(session["account_id"])
+    elif scope == "personal":
+        clauses.append("c.created_by_user_id IS NULL")
+    elif session["role"] == "user" and scope != "general":
         sector_filter, sector_params = employee_location_filter(session)
         clauses.append(sector_filter)
         params.extend(sector_params)
@@ -2359,13 +2538,18 @@ def list_history(
         clauses.append("c.location_id = ?")
         params.append(location_id)
     if status:
-        if status not in STATUSES | {"Concluída", "Não feito"}:
+        legacy_statuses = {"Limpo", "Não limpo", "Concluída", "Finalizada", "Não feito"}
+        if status not in STATUSES | legacy_statuses:
             raise HTTPException(status_code=422, detail="Filtro de status inválido.")
-        if status in STATUSES:
+        if status in {"Concluído", "Concluída", "Finalizada", "Limpo"}:
+            clauses.append("c.status IN ('Concluído', 'Limpo')")
+        elif status in {"Vencido", "Não feito"}:
+            clauses.append("c.status IN ('Vencido', 'Não feito')")
+        elif status in {"Pendente", "Não limpo"}:
+            clauses.append("c.status IN ('Pendente', 'Não limpo')")
+        elif status == "Iniciado":
             clauses.append("c.status = ?")
             params.append(status)
-        elif status == "Concluída":
-            clauses.append("c.status = 'Limpo'")
         else:
             clauses.append("0 = 1")
     if search.strip():
@@ -2385,7 +2569,8 @@ def list_history(
                 owner.sector AS responsible_sector,
                 COALESCE(u.name, co.fantasy_name) AS created_by_name,
                 u.name AS executor_name,
-                c.created_at AS event_at,
+                l.responsible_user_id AS assigned_user_id,
+                COALESCE(c.completed_at, c.started_at, c.created_at) AS event_at,
                 'cleaning' AS record_type
             FROM cleanings c
             JOIN locations l ON l.id = c.location_id
@@ -2397,13 +2582,14 @@ def list_history(
             """,
             params,
         ).fetchall()
-        task_clauses = [
-            "t.company_id = ?",
-            "(t.completed_at IS NOT NULL OR t.missed_at IS NOT NULL)",
-            "t.deleted_at IS NULL",
-        ]
+        task_clauses = ["t.company_id = ?", "t.deleted_at IS NULL"]
         task_params: list[str] = [session["company_id"]]
-        if session["role"] == "user":
+        if scope == "personal" and session["role"] == "user":
+            task_clauses.append("t.assigned_user_id = ?")
+            task_params.append(session["account_id"])
+        elif scope == "personal":
+            task_clauses.append("0 = 1")
+        elif session["role"] == "user" and scope != "general":
             task_clauses.append(
                 """lower(trim(assigned.sector)) = lower(trim((
                     SELECT active_user.sector FROM users active_user
@@ -2411,11 +2597,21 @@ def list_history(
                 )))"""
             )
             task_params.extend([session["account_id"], session["company_id"]])
-        if status == "Concluída":
+        if not status:
+            task_clauses.append("(t.completed_at IS NOT NULL OR t.missed_at IS NOT NULL)")
+        elif status in {"Concluído", "Concluída", "Finalizada", "Limpo"}:
             task_clauses.append("t.completed_at IS NOT NULL")
-        elif status == "Não feito":
+        elif status in {"Vencido", "Não feito"}:
             task_clauses.append("t.missed_at IS NOT NULL")
-        elif status in STATUSES:
+        elif status == "Iniciado":
+            task_clauses.append(
+                "t.started_at IS NOT NULL AND t.completed_at IS NULL AND t.missed_at IS NULL"
+            )
+        elif status == "Pendente":
+            task_clauses.append(
+                "t.started_at IS NULL AND t.completed_at IS NULL AND t.missed_at IS NULL"
+            )
+        else:
             task_clauses.append("0 = 1")
         if search.strip():
             task_clauses.append(
@@ -2424,28 +2620,37 @@ def list_history(
             )
             task_params.extend([f"%{search.strip()}%"] * 5)
         if date_from:
-            task_clauses.append("substr(COALESCE(t.completed_at, t.missed_at), 1, 10) >= ?")
+            task_clauses.append(
+                "substr(COALESCE(t.completed_at, t.missed_at, t.started_at, t.deadline), 1, 10) >= ?"
+            )
             task_params.append(date_from)
         if date_to:
-            task_clauses.append("substr(COALESCE(t.completed_at, t.missed_at), 1, 10) <= ?")
+            task_clauses.append(
+                "substr(COALESCE(t.completed_at, t.missed_at, t.started_at, t.deadline), 1, 10) <= ?"
+            )
             task_params.append(date_to)
         task_rows = conn.execute(
             f"""SELECT 'task-' || t.id AS id, t.id AS task_id,
                     COALESCE(schedule.location_id, '') AS location_id, 'task' AS record_type,
-                    substr(COALESCE(t.completed_at, t.missed_at), 1, 10) AS cleaning_date,
+                    COALESCE(substr(COALESCE(t.completed_at, t.missed_at, t.started_at), 1, 10),
+                        t.scheduled_for, substr(t.deadline, 1, 10)) AS cleaning_date,
                     t.completed_at AS completed_at,
                     t.missed_at AS missed_at,
-                    CASE WHEN t.missed_at IS NOT NULL THEN 'Não feito' ELSE 'Concluída' END AS status,
+                    CASE WHEN t.missed_at IS NOT NULL THEN 'Vencido'
+                        WHEN t.completed_at IS NOT NULL THEN 'Concluído'
+                        WHEN t.started_at IS NOT NULL THEN 'Iniciado'
+                        ELSE 'Pendente' END AS status,
                     t.photo_before, t.photo_after,
                     CASE WHEN t.missed_at IS NOT NULL THEN t.missed_notes
                         ELSE t.completion_notes END AS notes,
                     t.missed_acknowledged_at AS missed_acknowledged_at,
-                    COALESCE(t.completed_at, t.missed_at) AS created_at,
-                    COALESCE(t.completed_at, t.missed_at) AS event_at,
+                    COALESCE(t.completed_at, t.missed_at, t.started_at, t.created_at) AS created_at,
+                    COALESCE(t.completed_at, t.missed_at, t.started_at, t.created_at) AS event_at,
                     t.title AS location_name, t.deadline AS deadline,
                     COALESCE(cleaning_location.cleaning_type, '') AS cleaning_type,
                     assigned.name AS responsible, assigned.sector AS assignee_sector,
                     assigned.sector AS responsible_sector,
+                    t.assigned_user_id AS assigned_user_id,
                     executor.name AS executor_name,
                     executor.name AS created_by_name
                 FROM tasks t
@@ -2486,15 +2691,27 @@ def delete_missed_task(
 
 @app.post("/api/history", status_code=201)
 def create_cleaning(payload: CleaningInput, session: dict = Depends(current_session)):
-    status = "Limpo" if payload.photo_before and payload.photo_after else "Não limpo"
+    now = datetime.now(timezone.utc)
+    deadline = None
     cleaning_id = str(uuid.uuid4())
     with connection() as conn:
-        require_location_access(conn, payload.location_id, session)
+        location = require_location_access(conn, payload.location_id, session)
+        deadline = cleaning_deadline(payload.cleaning_date, location["schedule_time"])
+        completed = bool(payload.photo_before and payload.photo_after)
+        started = bool(payload.photo_before)
+        status = (
+            "Concluído" if completed
+            else "Vencido" if datetime.fromisoformat(deadline) <= now
+            else "Iniciado" if started
+            else "Pendente"
+        )
+        started_at = now.isoformat(timespec="seconds") if started else None
+        completed_at = now.isoformat(timespec="seconds") if completed else None
         conn.execute(
             """INSERT INTO cleanings
                 (id, location_id, cleaning_date, status, photo_before, photo_after, notes,
-                    created_by_user_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    created_by_user_id, started_at, completed_at, deadline, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 cleaning_id,
                 payload.location_id,
@@ -2504,7 +2721,10 @@ def create_cleaning(payload: CleaningInput, session: dict = Depends(current_sess
                 payload.photo_after,
                 payload.notes,
                 session["account_id"] if session["role"] == "user" else None,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                started_at,
+                completed_at,
+                deadline,
+                now.isoformat(timespec="seconds"),
             ),
         )
         row = conn.execute(
@@ -2519,6 +2739,107 @@ def create_cleaning(payload: CleaningInput, session: dict = Depends(current_sess
             (cleaning_id, session["company_id"]),
         ).fetchone()
         return dict(row)
+
+
+@app.post("/api/history/start", status_code=201)
+def start_cleaning(payload: CleaningStartInput, session: dict = Depends(current_session)):
+    process_due_tasks()
+    now = datetime.now(timezone.utc)
+    with connection() as conn:
+        location = require_location_access(conn, payload.location_id, session)
+        require_uploaded_photo(conn, payload.photo_before, session)
+        deadline = cleaning_deadline(payload.cleaning_date, location["schedule_time"])
+        existing = conn.execute(
+            """SELECT c.* FROM cleanings c
+                JOIN locations l ON l.id = c.location_id
+                WHERE c.id = ? AND l.company_id = ?""",
+            (payload.id, session["company_id"]),
+        ).fetchone()
+        if existing is not None:
+            if existing["location_id"] != payload.location_id:
+                raise HTTPException(status_code=409, detail="O identificador já está associado a outro registro.")
+            if existing["status"] == "Iniciado":
+                return dict(existing)
+            if existing["status"] in {"Concluído", "Vencido"}:
+                raise HTTPException(status_code=409, detail="Este registro não pode mais ser iniciado.")
+        elif conn.execute("SELECT 1 FROM cleanings WHERE id = ?", (payload.id,)).fetchone():
+            raise HTTPException(status_code=409, detail="O identificador já está em uso.")
+        if datetime.fromisoformat(deadline) <= now:
+            raise HTTPException(status_code=409, detail="O prazo desta rotina já venceu.")
+        started_at = now.isoformat(timespec="seconds")
+        if existing is None:
+            conn.execute(
+                """INSERT INTO cleanings
+                    (id, location_id, cleaning_date, status, photo_before, notes,
+                        created_by_user_id, started_at, deadline, created_at)
+                    VALUES (?, ?, ?, 'Iniciado', ?, ?, ?, ?, ?, ?)""",
+                (
+                    payload.id,
+                    payload.location_id,
+                    payload.cleaning_date.isoformat(),
+                    payload.photo_before,
+                    payload.notes,
+                    session["account_id"] if session["role"] == "user" else None,
+                    started_at,
+                    deadline,
+                    started_at,
+                ),
+            )
+        else:
+            conn.execute(
+                """UPDATE cleanings SET status = 'Iniciado', photo_before = ?, notes = ?,
+                        started_at = ?, deadline = ?
+                    WHERE id = ? AND status = 'Pendente'""",
+                (payload.photo_before, payload.notes, started_at, deadline, payload.id),
+            )
+        row = conn.execute(
+            """SELECT c.*, l.name AS location_name, l.responsible,
+                    COALESCE(u.name, co.fantasy_name) AS created_by_name,
+                    u.name AS executor_name
+                FROM cleanings c
+                JOIN locations l ON l.id = c.location_id
+                JOIN companies co ON co.id = l.company_id
+                LEFT JOIN users u ON u.id = c.created_by_user_id
+                WHERE c.id = ? AND l.company_id = ?""",
+            (payload.id, session["company_id"]),
+        ).fetchone()
+    return dict(row)
+
+
+@app.post("/api/history/{cleaning_id}/complete")
+def complete_cleaning(
+    cleaning_id: str,
+    payload: CleaningCompletionInput,
+    session: dict = Depends(current_session),
+):
+    process_due_tasks()
+    now = datetime.now(timezone.utc)
+    with connection() as conn:
+        record = conn.execute(
+            """SELECT c.* FROM cleanings c
+                JOIN locations l ON l.id = c.location_id
+                WHERE c.id = ? AND l.company_id = ?""",
+            (cleaning_id, session["company_id"]),
+        ).fetchone()
+        if record is None:
+            raise HTTPException(status_code=404, detail="Registro de limpeza não encontrado.")
+        require_location_access(conn, record["location_id"], session)
+        if record["completed_at"] is not None:
+            return {"id": cleaning_id, "status": "Concluído", "completed_at": record["completed_at"]}
+        if record["status"] == "Vencido" or (
+            record["deadline"] and datetime.fromisoformat(record["deadline"]) <= now
+        ):
+            raise HTTPException(status_code=409, detail="O prazo desta rotina venceu.")
+        if record["status"] != "Iniciado":
+            raise HTTPException(status_code=409, detail="Inicie a limpeza com a foto de antes.")
+        require_uploaded_photo(conn, payload.photo_after, session)
+        completed_at = now.isoformat(timespec="seconds")
+        conn.execute(
+            """UPDATE cleanings SET status = 'Concluído', photo_after = ?, completed_at = ?
+                WHERE id = ? AND status = 'Iniciado' AND completed_at IS NULL""",
+            (payload.photo_after, completed_at, cleaning_id),
+        )
+    return {"id": cleaning_id, "status": "Concluído", "completed_at": completed_at}
 
 
 @app.delete("/api/history/{cleaning_id}", status_code=204)
@@ -2563,8 +2884,8 @@ def dashboard(session: dict = Depends(current_session)):
         totals = conn.execute(
             f"""SELECT
                 COUNT(*) AS total_cleanings,
-                COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status = 'Limpo' THEN 1 ELSE 0 END), 0) AS completed_today,
-                COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status = 'Não limpo' THEN 1 ELSE 0 END), 0) AS attention_today
+                COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status IN ('Concluído', 'Limpo') THEN 1 ELSE 0 END), 0) AS completed_today,
+                COALESCE(SUM(CASE WHEN c.cleaning_date = ? AND c.status IN ('Pendente', 'Iniciado', 'Vencido', 'Não limpo') THEN 1 ELSE 0 END), 0) AS attention_today
                 FROM cleanings c JOIN locations l ON l.id = c.location_id
                 WHERE l.company_id = ?{location_scope}""",
             [today, today, session["company_id"], *location_scope_params],

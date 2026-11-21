@@ -108,6 +108,31 @@ function isTaskForToday(task, now = Date.now()) {
   return occurrenceDate.slice(0, 10) === localDateValue(new Date(now));
 }
 
+function scheduledCleaningDeadline(location, cleaningDate) {
+  if (!cleaningDate) return null;
+  const deadline = new Date(`${cleaningDate}T${location?.schedule_time || "23:59"}:00`);
+  return Number.isNaN(deadline.getTime()) ? null : deadline;
+}
+
+function isCompletedStatus(status) {
+  return ["Concluído", "Limpo", "Concluída", "Finalizada"].includes(status);
+}
+
+function displayCleaningStatus(status) {
+  if (["Limpo", "Concluída", "Finalizada"].includes(status)) return "Concluído";
+  if (status === "Não limpo") return "Pendente";
+  if (status === "Não feito") return "Vencido";
+  return status;
+}
+
+function statusPillClass(status) {
+  const displayStatus = displayCleaningStatus(status);
+  if (isCompletedStatus(displayStatus)) return "status-done";
+  if (displayStatus === "Vencido") return "status-overdue";
+  if (displayStatus === "Iniciado") return "status-attention";
+  return "status-neutral";
+}
+
 async function api(path, options = {}) {
   let response;
   try {
@@ -138,7 +163,16 @@ async function api(path, options = {}) {
   return response.status === 204 ? null : response.json();
 }
 
-function FilterDropdown({ id, icon: Icon, value, onChange, ariaLabel, disabled = false, className = "", children }) {
+function ClearFiltersButton({ active, onClick }) {
+  if (!active) return null;
+  return (
+    <button type="button" className="button-secondary clear-filters-btn" onClick={onClick}>
+      <X size={14} /> Limpar filtros
+    </button>
+  );
+}
+
+function FilterDropdown({ id, icon: Icon, value, onChange, ariaLabel, disabled = false, required = false, className = "", children }) {
   const generatedId = useId();
   const triggerId = id || generatedId;
   const listId = `${triggerId}-options`;
@@ -212,17 +246,19 @@ function FilterDropdown({ id, icon: Icon, value, onChange, ariaLabel, disabled =
 
   const selectedOption = options[selectedIndex] || options[0];
   return (
-    <div ref={rootRef} className={`filter-control filter-dropdown ${open ? "is-open" : ""} ${className}`.trim()}>
+    <div ref={rootRef} className={`filter-control filter-dropdown ${open ? "is-open" : ""} ${required && !value ? "is-placeholder" : ""} ${className}`.trim()}>
       {Icon && <Icon size={15} aria-hidden="true" />}
       <button
         ref={triggerRef}
         id={triggerId}
         type="button"
+        role={required ? "combobox" : undefined}
         className="filter-dropdown-trigger"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={listId}
+        aria-required={required || undefined}
         disabled={disabled}
         onClick={() => open ? setOpen(false) : showOptions()}
         onKeyDown={handleTriggerKeyDown}
@@ -254,6 +290,22 @@ function FilterDropdown({ id, icon: Icon, value, onChange, ariaLabel, disabled =
         </div>
       )}
     </div>
+  );
+}
+
+function FormDropdown({ id, value, onChange, ariaLabel, disabled = false, required = false, children }) {
+  return (
+    <FilterDropdown
+      id={id}
+      value={value}
+      onChange={onChange}
+      ariaLabel={ariaLabel}
+      disabled={disabled}
+      required={required}
+      className="form-select-dropdown"
+    >
+      {children}
+    </FilterDropdown>
   );
 }
 
@@ -376,6 +428,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [page, setPage] = useState("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const profileMenuRef = useRef(null);
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
   const [team, setTeam] = useState([]);
@@ -417,6 +470,15 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }, [account.login]);
 
+  useEffect(() => {
+    if (!profileMenuOpen) return undefined;
+    const closeOnOutsidePointer = (event) => {
+      if (!profileMenuRef.current?.contains(event.target)) setProfileMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [profileMenuOpen]);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setPageError("");
@@ -436,6 +498,11 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       setTeam(teamRows);
       setSectors(sectorRows);
       setTasks(taskRows);
+      setModal((current) => {
+        if (current?.type !== "task-execution") return current;
+        const refreshedTask = taskRows.find((task) => task.id === current.item.id);
+        return refreshedTask ? { ...current, item: refreshedTask } : current;
+      });
       setNotifications(notificationRows);
 
       // Save snapshots to local IndexedDB
@@ -547,14 +614,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       && matchesPhoto;
   }), [locations, query, frequencyFilter, responsibleFilter, photoFilter]);
 
-  const visibleHistory = useMemo(() => history.filter((entry) => {
-    const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.executor_name || ""} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
-    const matchesStatus = !statusFilter
-      || (statusFilter === "Feito" && ["Concluída", "Limpo"].includes(entry.status))
-      || (statusFilter === "Não feito" && ["Não feito", "Não limpo"].includes(entry.status));
-    return matchesQuery && matchesStatus;
-  }), [history, query, statusFilter]);
-
   async function saveLocation(values, id) {
     setSaving(true);
     try {
@@ -590,6 +649,163 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       setToast("Local salvo offline. Será sincronizado ao conectar à internet.");
     } catch (error) {
       setToast(error.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function startCleaning(values, id) {
+    setSaving(true);
+    const cleaningId = id || crypto.randomUUID();
+    try {
+      if (syncState.isOnline) {
+        try {
+          const result = await api("/history/start", {
+            method: "POST",
+            body: JSON.stringify({ ...values, id: cleaningId }),
+          });
+          setToast("Limpeza iniciada.");
+          await refresh();
+          return { ...result, offline: false };
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      let photoBeforeId = null;
+      let photoBefore = values.photo_before || "";
+      if (photoBefore.startsWith("data:")) {
+        const saved = await saveOfflinePhoto(photoBefore);
+        photoBeforeId = saved.id;
+        photoBefore = saved.dataUrl;
+      }
+      const startedAt = new Date().toISOString();
+      await addToOutbox({
+        type: "HISTORY_START",
+        endpoint: "/history/start",
+        method: "POST",
+        payload: {
+          ...values,
+          id: cleaningId,
+          photo_before: photoBeforeId ? "" : photoBefore,
+        },
+        photoBeforeId,
+      });
+
+      const location = locations.find((item) => String(item.id) === String(values.location_id));
+      const deadline = scheduledCleaningDeadline(location, values.cleaning_date);
+      const existing = history.find((entry) => entry.id === cleaningId);
+      const entry = {
+        ...existing,
+        id: cleaningId,
+        location_id: values.location_id,
+        location_name: location?.name || "Item de limpeza",
+        cleaning_date: values.cleaning_date,
+        cleaning_type: location?.cleaning_type || "Estrutural",
+        status: "Iniciado",
+        notes: values.notes || "",
+        responsible: location?.responsible || account.name || account.login,
+        responsible_sector: location?.responsible_sector || "",
+        created_by_name: account.name || account.login,
+        created_at: existing?.created_at || startedAt,
+        started_at: startedAt,
+        deadline: deadline?.toISOString() || null,
+        photo_before: photoBefore,
+        photo_after: "",
+        record_type: "cleaning",
+        started_offline: true,
+      };
+      const updatedHistory = [entry, ...history.filter((item) => item.id !== cleaningId)];
+      setHistory(updatedHistory);
+      await saveCache("history", updatedHistory);
+      const updatedLocations = locations.map((item) => String(item.id) === String(values.location_id)
+        ? {
+          ...item,
+          manual_today_status: "Iniciado",
+          last_status: "Iniciado",
+          last_cleaned: values.cleaning_date,
+          cleaning_count: Number(item.cleaning_count || 0) + (existing ? 0 : 1),
+        }
+        : item);
+      setLocations(updatedLocations);
+      await saveCache("locations", updatedLocations);
+      await syncManager.updatePendingCount();
+      setToast("Limpeza iniciada offline. Será sincronizada ao reconectar.");
+      return { id: cleaningId, started_at: startedAt, deadline: deadline?.toISOString(), photo_before: photoBefore, offline: true };
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function completeCleaning(values, id, startedOffline) {
+    setSaving(true);
+    try {
+      if (syncState.isOnline && !startedOffline) {
+        try {
+          const result = await api(`/history/${id}/complete`, {
+            method: "POST",
+            body: JSON.stringify({ photo_after: values.photo_after }),
+          });
+          setModal(null);
+          setToast("Atividade concluída.");
+          await refresh();
+          return result;
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      let photoAfterId = null;
+      let photoAfter = values.photo_after || "";
+      if (photoAfter.startsWith("data:")) {
+        const saved = await saveOfflinePhoto(photoAfter);
+        photoAfterId = saved.id;
+        photoAfter = saved.dataUrl;
+      }
+      const completedAt = new Date().toISOString();
+      await addToOutbox({
+        type: "HISTORY_COMPLETE",
+        endpoint: `/history/${id}/complete`,
+        method: "POST",
+        payload: { photo_after: photoAfterId ? "" : photoAfter },
+        photoAfterId,
+      });
+
+      const existing = history.find((entry) => entry.id === id);
+      const updatedHistory = history.map((entry) => entry.id === id
+        ? { ...entry, status: "Concluído", completed_at: completedAt, event_at: completedAt, photo_after: photoAfter }
+        : entry);
+      if (!existing) {
+        const location = locations.find((item) => String(item.id) === String(values.location_id));
+        updatedHistory.unshift({
+          id,
+          location_id: values.location_id,
+          location_name: location?.name || "Item de limpeza",
+          cleaning_date: values.cleaning_date,
+          cleaning_type: location?.cleaning_type || "Estrutural",
+          status: "Concluído",
+          notes: values.notes || "",
+          responsible: location?.responsible || account.name || account.login,
+          created_by_name: account.name || account.login,
+          created_at: completedAt,
+          completed_at: completedAt,
+          photo_before: values.photo_before || "",
+          photo_after: photoAfter,
+          record_type: "cleaning",
+        });
+      }
+      setHistory(updatedHistory);
+      await saveCache("history", updatedHistory);
+      const updatedLocations = locations.map((item) => String(item.id) === String(values.location_id)
+        ? { ...item, manual_today_status: "Concluído", last_status: "Concluído", last_cleaned: values.cleaning_date }
+        : item);
+      setLocations(updatedLocations);
+      await saveCache("locations", updatedLocations);
+      await syncManager.updatePendingCount();
+      setModal(null);
+      if (startedOffline && syncState.isOnline) await syncManager.triggerSync();
+      setToast("Atividade concluída offline. Será sincronizada ao reconectar.");
+      return { id, status: "Concluído", completed_at: completedAt };
     } finally {
       setSaving(false);
     }
@@ -645,7 +861,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
         location_name: loc?.name || "Item de limpeza",
         cleaning_date: values.cleaning_date || localDateValue(new Date()),
         cleaning_type: values.cleaning_type || "Estrutural",
-        status: values.status || (values.photo_before && values.photo_after ? "Limpo" : "Não limpo"),
+        status: values.status || (values.photo_before && values.photo_after ? "Concluído" : values.photo_before ? "Iniciado" : "Pendente"),
         notes: values.notes || "",
         responsible: loc?.responsible || account.name || account.login,
         created_by_name: account.name || account.login,
@@ -790,15 +1006,85 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     }
   }
 
-  async function completeTask(task, completion) {
+  async function startTask(task, photoBefore) {
     setSaving(true);
     try {
       if (syncState.isOnline) {
         try {
-          const [beforeUpload, afterUpload] = await Promise.all([
-            uploadCapturedPhoto(completion.photo_before),
-            uploadCapturedPhoto(completion.photo_after),
-          ]);
+          const beforeUpload = await uploadCapturedPhoto(photoBefore);
+          const result = await api(`/tasks/${task.id}/start`, {
+            method: "POST",
+            body: JSON.stringify({ photo_before: beforeUpload.url }),
+          });
+          const updatedTasks = tasks.map((item) => item.id === task.id
+            ? {
+              ...item,
+              started_at: result.started_at,
+              photo_before: result.photo_before,
+              started_offline: false,
+            }
+            : item);
+          setTasks(updatedTasks);
+          await saveCache("tasks", updatedTasks);
+          setModal((current) => current?.type === "task-execution" && current.item.id === task.id
+            ? { ...current, item: { ...current.item, ...result, started_offline: false } }
+            : current);
+          setToast("Limpeza iniciada.");
+          return { ...result, offline: false };
+        } catch (netErr) {
+          if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+        }
+      }
+
+      const savedBefore = await saveOfflinePhoto(photoBefore);
+      const startedAt = new Date().toISOString();
+      await addToOutbox({
+        type: "TASK_START",
+        endpoint: `/tasks/${task.id}/start`,
+        method: "POST",
+        payload: {},
+        photoBeforeId: savedBefore.id,
+        taskId: task.id,
+      });
+      const updatedTasks = tasks.map((item) => item.id === task.id
+        ? {
+          ...item,
+          started_at: startedAt,
+          photo_before: savedBefore.dataUrl,
+          started_offline: true,
+        }
+        : item);
+      setTasks(updatedTasks);
+      await saveCache("tasks", updatedTasks);
+      setModal((current) => current?.type === "task-execution" && current.item.id === task.id
+        ? {
+          ...current,
+          item: {
+            ...current.item,
+            started_at: startedAt,
+            photo_before: savedBefore.dataUrl,
+            started_offline: true,
+          },
+        }
+        : current);
+      await syncManager.updatePendingCount();
+      setToast("Limpeza iniciada offline. Será sincronizada ao reconectar.");
+      return { started_at: startedAt, photo_before: savedBefore.dataUrl, offline: true };
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function completeTask(task, completion) {
+    setSaving(true);
+    try {
+      const mustQueueBehindStart = task.started_offline || completion.started_offline;
+      if (syncState.isOnline && !mustQueueBehindStart) {
+        try {
+          const beforeUpload = task.started_at && task.photo_before
+            ? { url: task.photo_before }
+            : await uploadCapturedPhoto(completion.photo_before);
+          const afterUpload = await uploadCapturedPhoto(completion.photo_after);
           const result = await api(`/tasks/${task.id}/complete`, {
             method: "POST",
             body: JSON.stringify({
@@ -811,6 +1097,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
             ? {
               ...item,
               completed_at: result.completed_at,
+              started_at: task.started_at || result.started_at,
               photo_before: beforeUpload.url,
               photo_after: afterUpload.url,
               completion_notes: completion.notes,
@@ -826,17 +1113,26 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
       }
 
       // Offline flow: store captured photos in IndexedDB and queue outbox
+      const savedBeforePromise = task.photo_before?.startsWith("/uploads/")
+        ? Promise.resolve(null)
+        : saveOfflinePhoto(completion.photo_before);
       const [savedBefore, savedAfter] = await Promise.all([
-        saveOfflinePhoto(completion.photo_before),
+        savedBeforePromise,
         saveOfflinePhoto(completion.photo_after),
       ]);
+      const beforePhoto = task.photo_before?.startsWith("/uploads/")
+        ? task.photo_before
+        : savedBefore.dataUrl;
 
       await addToOutbox({
         type: "TASK_COMPLETE",
         endpoint: `/tasks/${task.id}/complete`,
         method: "POST",
-        payload: { notes: completion.notes },
-        photoBeforeId: savedBefore.id,
+        payload: {
+          notes: completion.notes,
+          ...(savedBefore ? {} : { photo_before: beforePhoto }),
+        },
+        photoBeforeId: savedBefore?.id,
         photoAfterId: savedAfter.id,
         taskId: task.id,
       });
@@ -846,7 +1142,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
         ? {
           ...item,
           completed_at: nowIso,
-          photo_before: savedBefore.dataUrl,
+          started_at: item.started_at || task.started_at || nowIso,
+          photo_before: beforePhoto,
           photo_after: savedAfter.dataUrl,
           completion_notes: completion.notes,
         }
@@ -856,15 +1153,16 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
       const newHistoryEntry = {
         id: `offline_${Date.now()}`,
+        record_type: "task",
         cleaning_date: localDateValue(new Date()),
         location_name: task.title || task.location_name,
         cleaning_type: task.cleaning_type || "Geral",
-        status: "Limpo",
+        status: "Concluído",
         notes: completion.notes || "Concluído offline",
         responsible: account.name || account.login,
         created_by_name: account.name || account.login,
         created_at: nowIso,
-        photo_before: savedBefore.dataUrl,
+        photo_before: beforePhoto,
         photo_after: savedAfter.dataUrl,
       };
       const updatedHistory = [newHistoryEntry, ...history];
@@ -873,6 +1171,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
       await syncManager.updatePendingCount();
       setModal(null);
+      if (mustQueueBehindStart) await syncManager.triggerSync();
       setToast("Tarefa concluída offline! Salva com segurança e será sincronizada assim que conectar ao Wi-Fi.");
     } catch (error) {
       setToast(error.message);
@@ -960,6 +1259,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
     setPage(nextPage);
     setQuery("");
     setMobileNav(false);
+    setProfileMenuOpen(false);
   }
 
   function title() {
@@ -994,10 +1294,18 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           <button className={`nav-link about-link ${page === "about" ? "active" : ""}`} onClick={() => navigate("about")}>
             <CircleAlert size={18} strokeWidth={1.8} /><span>Sobre o app</span>
           </button>
-          <div className="profile">
-            <div className="avatar">{initials(account.name)}</div>
-            <div className="profile-copy"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
-            <button className="icon-button profile-more" aria-label="Abrir perfil" title="Configurações do perfil" onClick={() => setProfileMenuOpen((open) => !open)}><MoreHorizontal size={17} /></button>
+          <div ref={profileMenuRef} className="profile-menu-wrap sidebar-profile-menu-wrap">
+            <div className="profile">
+              <div className="avatar">{initials(account.name)}</div>
+              <div className="profile-copy"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
+              <button className="icon-button profile-more" aria-label="Abrir perfil" title="Configurações do perfil" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)}><MoreHorizontal size={17} /></button>
+            </div>
+            {profileMenuOpen && (
+              <div className="profile-menu">
+                <div className="profile-menu-heading"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
+                <button onClick={onLogout}><LogOut size={16} /> Sair</button>
+              </div>
+            )}
           </div>
         </div>
       </aside>
@@ -1061,7 +1369,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
                           {notification.event_type === "completed" ? <Check size={14} /> : <CheckCircle2 size={14} />}
                         </span>
                         <div className="notification-copy">
-                          <strong>{notification.event_type === "completed" ? "Tarefa concluída" : "Ciência registrada"}</strong>
+                          <strong>{notification.event_type === "completed" ? "Tarefa finalizada" : "Ciência registrada"}</strong>
                           <p>{notification.event_type === "completed"
                             ? `Responsável ${notification.assignee_name || "—"} · execução ${notification.actor_name || "Funcionário"} · setor ${notification.actor_sector || "—"} concluiu “${notification.task_title}”`
                             : `${notification.actor_name || "Funcionário"} · setor ${notification.actor_sector || "—"} deu ciência da tarefa de ${notification.assignee_name || "—"} “${notification.task_title}”`} · prazo {formatDeadline(notification.deadline)}</p>
@@ -1075,15 +1383,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               </div>
             )}
             {installPrompt && <button className="install-button" onClick={onInstall}><Download size={15} /><span>Instalar app</span></button>}
-            <div className="profile-menu-wrap">
-              <button className="top-avatar profile-trigger" title="Abrir perfil" aria-label="Abrir perfil" aria-expanded={profileMenuOpen} onClick={() => setProfileMenuOpen((open) => !open)}>{initials(account.name)}</button>
-              {profileMenuOpen && (
-                <div className="profile-menu">
-                  <div className="profile-menu-heading"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
-                  <button onClick={onLogout}><LogOut size={16} /> Sair</button>
-                </div>
-              )}
-            </div>
           </div>
         </header>
 
@@ -1103,7 +1402,16 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               account={account}
               isBoss={isBoss}
               onNavigate={navigate}
-              onAddCleaning={(location) => setModal({ type: "cleaning", initial: location ? { location_id: location.id } : null })}
+              onAddCleaning={(location) => {
+                const activeRecord = history.find((entry) => entry.record_type === "cleaning"
+                  && entry.status === "Iniciado"
+                  && (!location || String(entry.location_id) === String(location.id)));
+                setModal({
+                  type: "cleaning",
+                  item: activeRecord || null,
+                  initial: location ? { location_id: location.id } : null,
+                });
+              }}
               onOpenRecord={(record) => setModal({ type: "record", item: record })}
             />
           )}
@@ -1113,6 +1421,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               allLocations={locations}
               sectors={sectors}
               loading={loading}
+              query={query}
               frequency={frequencyFilter}
               setFrequency={setFrequencyFilter}
               responsible={responsibleFilter}
@@ -1120,32 +1429,46 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               photo={photoFilter}
               setPhoto={setPhotoFilter}
               isBoss={isBoss}
+              onClearSearch={() => setQuery("")}
               onAdd={() => setModal({ type: "location" })}
               onAddToSector={(sector) => setModal({ type: "location", initialSector: sector })}
               onEdit={(item) => setModal({ type: "location", item })}
               onView={(item) => setModal({ type: "location-detail", item })}
-              onAddCleaning={(item) => setModal({ type: "cleaning", initial: { location_id: item.id } })}
+              onAddCleaning={(item) => {
+                const activeRecord = history.find((entry) => entry.record_type === "cleaning"
+                  && entry.status === "Iniciado"
+                  && String(entry.location_id) === String(item.id));
+                setModal({
+                  type: "cleaning",
+                  item: activeRecord || null,
+                  initial: { location_id: item.id },
+                });
+              }}
             />
           )}
           {page === "history" && (
             <HistoryPage
-              entries={visibleHistory}
+              entries={history}
               locations={locations}
               sectors={sectors}
               isBoss={isBoss}
               loading={loading}
+              query={query}
+              onClearSearch={() => setQuery("")}
               status={statusFilter}
               setStatus={setStatusFilter}
-              onAdd={() => setModal({ type: "cleaning" })}
               onView={(item) => setModal({ type: "record", item })}
             />
           )}
           {page === "tasks" && (
             <TasksPage
-              tasks={tasks.filter((task) => `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector} ${task.completed_by_name || ""}`.toLowerCase().includes(query.toLowerCase()))}
+              tasks={tasks}
               loading={loading}
               isBoss={isBoss}
+              account={account}
               sectors={sectors}
+              query={query}
+              onClearSearch={() => setQuery("")}
               now={taskNow}
               onCreate={() => setModal({ type: "task" })}
               onEdit={(task) => setModal({ type: "task", item: task })}
@@ -1159,6 +1482,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               team={team}
               sectors={sectors}
               loading={loading}
+              query={query}
+              onClearSearch={() => setQuery("")}
               company={account.company}
               tasks={tasks}
               onManageSectors={() => setModal({ type: "sectors" })}
@@ -1205,6 +1530,8 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           saving={saving}
           onClose={() => setModal(null)}
           onSave={saveCleaning}
+          onStart={startCleaning}
+          onComplete={completeCleaning}
         />
       )}
       {modal?.type === "task" && (
@@ -1248,6 +1575,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           isSubstitute={modal.item.assigned_user_id !== account.account_id}
           saving={saving}
           onClose={() => setModal(null)}
+          onStart={startTask}
           onSave={(completion) => completeTask(modal.item, completion)}
         />
       )}
@@ -1414,6 +1742,7 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           item={modal.item}
           onClose={() => setModal(null)}
           onDelete={() => removeItem("history", modal.item.id)}
+          canDelete={isBoss || modal.item.created_by_user_id === account.account_id}
         />
       )}
       {modal?.type === "location-detail" && (
@@ -1532,7 +1861,7 @@ function AuthPage({ initialError, onAuthenticated }) {
         <div className="auth-brand"><span className="auth-brand-mark"><Leaf size={22} /></span><div><strong>Routiner</strong><small>GESTÃO DE LIMPEZA</small></div></div>
         <div className="auth-heading"><span className="eyebrow">{registration ? "COMECE POR AQUI" : mode === "reset" ? "REDEFINIÇÃO DE SENHA" : mode === "forgot" ? "RECUPERAÇÃO DE SENHA" : "BEM-VINDO DE VOLTA"}</span><h1>{heading[0]}</h1><p>{heading[1]}</p></div>
         {!registration && mode !== "reset" && (
-          <div className="auth-role-switch" aria-label="Tipo de acesso">
+          <div className={`auth-role-switch ${role === "user" ? "is-second-selected" : ""}`} aria-label="Tipo de acesso">
             <button type="button" className={role === "company" ? "selected" : ""} onClick={() => { setRole("company"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Building2 size={16} /> Empresa / chefe</button>
             <button type="button" className={role === "user" ? "selected" : ""} onClick={() => { setRole("user"); setValues((current) => ({ ...current, identifier: "" })); setError(""); }}><Users size={16} /> Funcionário</button>
           </div>
@@ -1575,15 +1904,24 @@ function AuthPage({ initialError, onAuthenticated }) {
   );
 }
 
-function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onAdd, onEdit }) {
+function TeamPage({ team, sectors, loading, query, onClearSearch, company, tasks, onManageSectors, onAdd, onEdit }) {
   const [sector, setSector] = useState("");
   const [pendingFilter, setPendingFilter] = useState("");
+  const searchTerm = query.trim().toLowerCase();
   const visibleTeam = team.filter((member) => {
     const memberTasks = tasks.filter((task) => task.assigned_user_id === member.id);
     const hasPending = memberTasks.some((task) => !task.completed_at && !task.missed_at);
-    return (!sector || sameSector(member.sector, sector))
+    const matchesQuery = `${member.name} ${member.sector} ${member.login} ${member.email || ""}`.toLowerCase().includes(searchTerm);
+    return matchesQuery
+      && (!sector || sameSector(member.sector, sector))
       && (!pendingFilter || (pendingFilter === "pending" ? hasPending : !hasPending));
   });
+  const hasFilters = Boolean(query || sector || pendingFilter);
+  const clearFilters = () => {
+    setSector("");
+    setPendingFilter("");
+    onClearSearch();
+  };
   return (
     <>
       <PageHeading eyebrow="ADMINISTRAÇÃO DA EMPRESA" title="Sua equipe" description="Gerencie setores, funcionários e demandas atribuídas." action={<div className="heading-actions"><button className="button-secondary" onClick={onManageSectors}><Settings size={16} /> Setores</button><button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar funcionário</button></div>} />
@@ -1593,6 +1931,7 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
         <div className="toolbar-filters team-filters">
           <div className="team-filter-field"><label htmlFor="team-sector-filter">Setor</label><FilterDropdown id="team-sector-filter" icon={Users} value={sector} onChange={setSector} ariaLabel="Filtrar equipe por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</FilterDropdown></div>
           <div className="team-filter-field"><label htmlFor="team-status-filter">Situação</label><FilterDropdown id="team-status-filter" icon={Filter} value={pendingFilter} onChange={setPendingFilter} ariaLabel="Filtrar equipe por pendências"><option value="">Todas as situações</option><option value="pending">Com pendências</option><option value="clear">Sem pendências</option></FilterDropdown></div>
+          <ClearFiltersButton active={hasFilters} onClick={clearFilters} />
         </div>
         {loading && !team.length ? <LoadingState /> : visibleTeam.length ? (
           <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>E-MAIL DE RECUPERAÇÃO</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
@@ -1604,21 +1943,65 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
   );
 }
 
-function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onDelete, onDeletionHistory, onComplete }) {
+function TasksPage({ tasks: cachedTasks, loading, isBoss, account, sectors, query, onClearSearch, now, onCreate, onEdit, onDelete, onDeletionHistory, onComplete }) {
+  const [taskView, setTaskView] = useState("general");
+  const [viewTasks, setViewTasks] = useState(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState("");
+  const [retry, setRetry] = useState(0);
   const [sector, setSector] = useState("");
   const [viewMode, setViewMode] = useState("list"); // 'list' | 'calendar'
   const [periodFilter, setPeriodFilter] = useState("Diário"); // 'Diário' | 'Semanal' | 'Mensal'
   const [monthWeekFilter, setMonthWeekFilter] = useState("all"); // 'all' | '1' | '2' | '3' | '4' | 'last'
   const [activeDate, setActiveDate] = useState(() => new Date(now));
+  useEffect(() => {
+    if (isBoss) {
+      setViewTasks(null);
+      setViewError("");
+      setViewLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setViewTasks(null);
+    setViewError("");
+    setViewLoading(true);
+    api(`/tasks?scope=${taskView}`)
+      .then((rows) => { if (active) setViewTasks(rows); })
+      .catch((error) => { if (active) setViewError(error.message); })
+      .finally(() => { if (active) setViewLoading(false); });
+    return () => { active = false; };
+  }, [isBoss, taskView, retry]);
+  const rawTasks = isBoss ? cachedTasks : viewTasks || [];
+  const sourceTasks = useMemo(() => rawTasks.filter((task) =>
+    `${task.title} ${task.description} ${task.assignee_name} ${task.assignee_sector} ${task.completed_by_name || ""}`
+      .toLowerCase().includes(query.toLowerCase())), [rawTasks, query]);
+  const tasksLoading = isBoss ? loading && !sourceTasks.length : viewLoading;
 
-  // Base filtrada por setor
+  const taskSectorOptions = [...new Set([
+    ...sectors.map((item) => item.name),
+    ...rawTasks.map((task) => task.assignee_sector),
+  ].filter(Boolean))].sort((left, right) => left.localeCompare(right, "pt-BR"));
   const sectorTasks = useMemo(() => {
-    return tasks.filter((task) => (!isBoss || !sector || sameSector(task.assignee_sector, sector)));
-  }, [tasks, isBoss, sector]);
+    return sourceTasks.filter((task) => (!sector || sameSector(task.assignee_sector, sector)));
+  }, [sourceTasks, sector]);
 
   // Helpers de data
   const todayStr = useMemo(() => localDateValue(new Date(now)), [now]);
   const activeDateStr = useMemo(() => localDateValue(activeDate), [activeDate]);
+  const hasFilters = Boolean(
+    query
+    || sector
+    || periodFilter !== "Diário"
+    || monthWeekFilter !== "all"
+    || activeDateStr !== todayStr,
+  );
+  const clearFilters = () => {
+    setSector("");
+    setPeriodFilter("Diário");
+    setMonthWeekFilter("all");
+    setActiveDate(new Date(now));
+    onClearSearch();
+  };
 
   // Dias da semana corrente para o modo Semanal
   const currentWeekDays = useMemo(() => {
@@ -1733,6 +2116,14 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
     setActiveDate(new Date(now));
   }
 
+  function changeTaskView(nextView) {
+    if (nextView === taskView) return;
+    setTaskView(nextView);
+    setViewTasks(null);
+    setViewError("");
+    setSector("");
+  }
+
   const periodLabel = useMemo(() => {
     if (periodFilter === "Diário") {
       return activeDate.toLocaleDateString("pt-BR", { weekday: "short", day: "2-digit", month: "long", year: "numeric" });
@@ -1752,7 +2143,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
         title="Lista de Tarefas"
         description={isBoss
           ? "Acompanhe as rotinas no calendário, filtre por frequência e gerencie a execução da equipe."
-          : "Veja suas tarefas em lista ou calendário, organizadas por dia, semana ou mês."}
+          : "Alterne entre as tarefas gerais da equipe e as tarefas atribuídas a você."}
         action={
           <div className="heading-actions">
             <div className="view-mode-toggle" role="group" aria-label="Modo de visualização">
@@ -1782,6 +2173,12 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
       />
 
       <div className="toolbar panel task-calendar-toolbar">
+        {!isBoss && (
+          <div className={`auth-role-switch task-view-switch ${taskView === "personal" ? "is-second-selected" : ""}`} role="group" aria-label="Modo de exibição das tarefas">
+            <button type="button" className={taskView === "general" ? "selected" : ""} aria-pressed={taskView === "general"} onClick={() => changeTaskView("general")}><ClipboardCheck size={16} /> Tarefas gerais</button>
+            <button type="button" className={taskView === "personal" ? "selected" : ""} aria-pressed={taskView === "personal"} onClick={() => changeTaskView("personal")}><Users size={16} /> Suas tarefas</button>
+          </div>
+        )}
         <div className="period-filter-group" role="group" aria-label="Filtro de período">
           {["Diário", "Semanal", "Mensal"].map((f) => (
             <button
@@ -1828,20 +2225,23 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
           </button>
         </div>
 
-        {isBoss && (
+        {(isBoss || taskView === "general") && (
           <FilterDropdown icon={Users} value={sector} onChange={setSector} ariaLabel="Filtrar tarefas por setor">
               <option value="">Todos os setores</option>
-              {sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
+              {taskSectorOptions.map((item) => <option key={item} value={item}>{item}</option>)}
           </FilterDropdown>
         )}
+        <ClearFiltersButton active={hasFilters} onClick={clearFilters} />
       </div>
 
-      {!isBoss && tasks.some((task) => !task.acknowledged_at && !task.completed_at && !task.missed_at) && (
+      {viewError && <div className="error-banner"><CircleAlert size={18} /><span>{viewError}</span><button onClick={() => setRetry((current) => current + 1)}>Tentar novamente</button></div>}
+
+      {!isBoss && cachedTasks.some((task) => task.assigned_user_id === account.account_id && !task.acknowledged_at && !task.completed_at && !task.missed_at) && (
         <div className="task-reminder"><CircleAlert size={17} /> Você tem uma tarefa que precisa de ciência. Confirme o aviso para continuar.</div>
       )}
 
       {/* Visualização de Calendário Interativo */}
-      {viewMode === "calendar" && (
+      {viewMode === "calendar" && !viewError && (
         <div className="calendar-grid-card panel">
           <div className="calendar-grid-header">
             {WEEKDAYS.map((day) => <div className="calendar-head-cell" key={day}>{day}</div>)}
@@ -1902,9 +2302,9 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
             <p>{pending.length} {pending.length === 1 ? "tarefa pendente" : "tarefas pendentes"} {periodFilter !== "Diário" ? `(${periodFilter.toLowerCase()})` : ""}</p>
           </div>
         </div>
-        {loading && !tasks.length ? (
+        {tasksLoading ? (
           <LoadingState />
-        ) : pending.length ? (
+        ) : viewError ? null : pending.length ? (
           <div className="task-list">
             {pending.map((task) => {
               const urgency = deadlineUrgency(task.deadline, now);
@@ -1916,8 +2316,8 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                   <div className="task-content">
                     <div className="task-title-row">
                       <h3>{task.title}</h3>
-                      {urgency === "overdue" ? <span className="status-pill status-overdue">Vencido</span> : <span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>
-                        {task.acknowledged_at ? "Ciente" : "Aguardando ciência"}
+                      {urgency === "overdue" ? <span className="status-pill status-overdue">Vencido</span> : <span className={`status-pill ${task.started_at ? "status-attention" : "status-neutral"}`}>
+                        {task.started_at ? "Iniciado" : "Pendente"}
                       </span>}
                     </div>
                     {task.description && <p className="task-description">{task.description}</p>}
@@ -1926,7 +2326,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                       <span><Users size={14} />Responsável: {task.assignee_name} · {task.assignee_sector}</span>
                     </div>
                   </div>
-                  {!isBoss && task.acknowledged_at && (
+                  {!isBoss && task.acknowledged_at && sameSector(task.assignee_sector, account.sector) && (
                     <button className="button-primary task-complete" onClick={() => onComplete(task)}>
                       <Check size={16} /> Fazer tarefa
                     </button>
@@ -1967,7 +2367,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
           <div className="section-head">
             <div>
               <h2>Concluídas e vencidas</h2>
-              <p>{completed.length} {completed.length === 1 ? "registro finalizado" : "registros finalizados"}</p>
+              <p>{completed.length} {completed.length === 1 ? "registro concluído" : "registros concluídos"}</p>
             </div>
           </div>
           <div className="task-list">
@@ -1980,7 +2380,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                   <div className="task-title-row">
                     <h3>{task.title}</h3>
                     <span className={`status-pill ${task.missed_at ? "status-overdue" : "status-done"}`}>
-                      {task.missed_at ? "Vencido" : "Concluída"}
+                      {task.missed_at ? "Vencido" : "Concluído"}
                     </span>
                   </div>
                   <div className="task-meta">
@@ -2044,8 +2444,8 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
       {item
         ? <div className="task-edit-summary"><strong>{item.title}</strong>{item.description && <p>{item.description}</p>}<small>O nome e os detalhes da tarefa não podem ser editados.</small></div>
         : <div className="form-field"><label htmlFor="task-title">Tarefa <span className="required">*</span></label><input id="task-title" autoFocus required minLength={2} maxLength={120} placeholder="Ex.: Higienizar a área de preparo" value={values.title} onChange={(event) => setValues({ ...values, title: event.target.value })} /></div>}
-      <div className="form-field"><label htmlFor="task-sector">Setor <span className="required">*</span></label><select id="task-sector" required value={sector} onChange={(event) => { setSector(event.target.value); setValues((current) => ({ ...current, assigned_user_id: "" })); }}><option value="">Selecione um setor</option>{sectors.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-      <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><select id="task-assignee" required disabled={!sector} value={values.assigned_user_id} onChange={(event) => setValues((current) => ({ ...current, assigned_user_id: event.target.value }))}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
+      <div className="form-field"><label htmlFor="task-sector">Setor <span className="required">*</span></label><FormDropdown id="task-sector" required value={sector} ariaLabel="Setor" onChange={(value) => { setSector(value); setValues((current) => ({ ...current, assigned_user_id: "" })); }}><option value="">Selecione um setor</option>{sectors.map((value) => <option key={value} value={value}>{value}</option>)}</FormDropdown></div>
+      <div className="form-field"><label htmlFor="task-assignee">Funcionário responsável <span className="required">*</span></label><FormDropdown id="task-assignee" required disabled={!sector} value={values.assigned_user_id} ariaLabel="Funcionário responsável" onChange={(value) => setValues((current) => ({ ...current, assigned_user_id: value }))}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</FormDropdown>{!team.length && <small className="field-hint">Cadastre primeiro um funcionário na seção Equipe.</small>}</div>
       <div className="form-field"><label htmlFor="task-deadline">Prazo final — data e hora <span className="required">*</span></label><input id="task-deadline" type="datetime-local" required value={values.deadline} onChange={(event) => setValues({ ...values, deadline: event.target.value })} /><small className="field-hint">O horário será salvo com o fuso local e exibido para a equipe.</small></div>
       {!item && <div className="form-field"><label htmlFor="task-description">Detalhes <span className="optional">(opcional)</span></label><textarea id="task-description" rows="3" maxLength={1000} placeholder="Explique o que precisa ser feito…" value={values.description} onChange={(event) => setValues({ ...values, description: event.target.value })} /></div>}
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
@@ -2120,22 +2520,38 @@ function TaskDeletionHistory({ onClose }) {
   </Modal>;
 }
 
-function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
-  const [photoBefore, setPhotoBefore] = useState(null);
+function TaskExecutionForm({ task, isSubstitute, saving, onClose, onStart, onSave }) {
+  const [photoBefore, setPhotoBefore] = useState(() => task.photo_before || null);
   const [photoAfter, setPhotoAfter] = useState(null);
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
-  const [startedAt, setStartedAt] = useState(null);
-  const [elapsed, setElapsed] = useState(0);
-  const isOverdue = new Date(task.deadline).getTime() <= Date.now();
+  const [startedAt, setStartedAt] = useState(() => {
+    const timestamp = Date.parse(task.started_at || "");
+    return Number.isFinite(timestamp) ? timestamp : null;
+  });
+  const [startedOffline, setStartedOffline] = useState(Boolean(task.started_offline));
+  const [elapsed, setElapsed] = useState(() => {
+    const timestamp = Date.parse(task.started_at || "");
+    return Number.isFinite(timestamp) ? Math.max(0, Math.floor((Date.now() - timestamp) / 1000)) : 0;
+  });
   const canSubmit = photoBefore && photoAfter;
-  const canRegister = canSubmit || isOverdue;
+  const canRegister = Boolean(startedAt && canSubmit);
 
   useEffect(() => {
     if (!startedAt) return;
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    const updateElapsed = () => setElapsed(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    updateElapsed();
+    const timer = setInterval(updateElapsed, 1000);
     return () => clearInterval(timer);
   }, [startedAt]);
+
+  useEffect(() => {
+    if (!task.started_at || !task.photo_before || task.started_offline) return;
+    const timestamp = Date.parse(task.started_at);
+    if (Number.isFinite(timestamp)) setStartedAt(timestamp);
+    setStartedOffline(false);
+    setPhotoBefore(task.photo_before);
+  }, [task.started_at, task.photo_before, task.started_offline]);
 
   function formatElapsed(secs) {
     const m = Math.floor(secs / 60);
@@ -2149,38 +2565,51 @@ function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
       setError("Informe o motivo de estar executando a tarefa no lugar do responsável.");
       return;
     }
+    if (!startedAt) {
+      setError("Tire a foto de antes e inicie a limpeza antes de registrar.");
+      return;
+    }
     if (!photoBefore || !photoAfter) {
       setError("Tire as fotos de antes e depois para concluir.");
       return;
     }
     setError("");
-    await onSave({ photo_before: photoBefore, photo_after: photoAfter, notes });
+    await onSave({ photo_before: photoBefore, photo_after: photoAfter, notes, started_offline: startedOffline });
+  }
+
+  async function beginCleaning() {
+    if (!photoBefore) {
+      setError("Tire a foto de antes para habilitar o início da limpeza.");
+      return;
+    }
+    setError("");
+    try {
+      const result = await onStart(task, photoBefore);
+      const timestamp = Date.parse(result.started_at);
+      setStartedAt(Number.isFinite(timestamp) ? timestamp : Date.now());
+      setStartedOffline(Boolean(result.offline));
+      setPhotoBefore(result.photo_before || photoBefore);
+    } catch (startError) {
+      setError(startError.message);
+    }
   }
 
   return <Modal title="Fazer tarefa" subtitle="EXECUÇÃO DA TAREFA" onClose={onClose} wide>
     <form className="modal-form task-execution-form" onSubmit={submit}>
       <div className="task-execution-summary"><strong>{task.title}</strong><span>{task.description || "Registre a execução da tarefa atribuída."}</span><small>Prazo: {formatDeadline(task.deadline)}</small></div>
-      {!startedAt && !photoBefore && (
-        <div className="task-start-action">
-          <button type="button" className="button-primary task-start-btn" onClick={() => { setStartedAt(Date.now()); }}>
-            <Camera size={18} /> Iniciar limpeza
-          </button>
-          <small className="field-hint">Clique para registrar o início e tirar a foto de antes.</small>
-        </div>
-      )}
-      {(startedAt || photoBefore) && (
+      {startedAt && (
         <div className="task-status-banner">
           <span className="status-pill status-attention">Iniciado</span>
-          {startedAt && <span className="task-elapsed"><Clock3 size={13} /> Em execução: {formatElapsed(elapsed)}</span>}
+          <span className="task-elapsed"><Clock3 size={13} /> Em execução: {formatElapsed(elapsed)}</span>
         </div>
       )}
       <div className="task-photo-grid">
-        <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={(file) => { setPhotoBefore(file); if (!startedAt) setStartedAt(Date.now()); }} autoOpen={startedAt && !photoBefore} />
-        <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} disabled={!photoBefore} />
+        <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={(file) => { setPhotoBefore(file); setError(""); }} readOnly={Boolean(startedAt && photoBefore)} />
+        <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={(file) => { setPhotoAfter(file); setError(""); }} disabled={!startedAt} />
       </div>
       <div className="form-field"><label htmlFor="task-completion-notes">{isSubstitute ? <>Por que você está executando a tarefa de {task.assignee_name}? <span className="required">*</span></> : "Observações (opcional)"}</label><textarea id="task-completion-notes" required={isSubstitute} maxLength={1000} rows={3} placeholder={isSubstitute ? "Descreva o motivo da execução por outra pessoa…" : "Adicione uma observação (opcional)"} value={notes} onChange={(event) => { setNotes(event.target.value); setError(""); }} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving || !canRegister}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Registrar"}</button></footer>
+      <footer className="modal-footer task-execution-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button type="button" className="button-secondary" disabled={saving || !photoBefore || Boolean(startedAt)} onClick={beginCleaning}><Camera size={16} />{startedAt ? "Iniciado" : "Iniciar limpeza"}</button><button className="button-primary" disabled={saving || !canRegister}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Registrar"}</button></footer>
     </form>
   </Modal>;
 }
@@ -2261,15 +2690,19 @@ function PhotoLightbox({ photo, label, onClose }) {
   );
 }
 
-function CameraPhotoField({ label, photo, onChange }) {
+function CameraPhotoField({ label, photo, onChange, disabled = false, readOnly = false }) {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [error, setError] = useState("");
   const [previewOpen, setPreviewOpen] = useState(false);
-  const preview = useMemo(() => photo ? URL.createObjectURL(photo) : "", [photo]);
-  useEffect(() => () => {
-    if (preview) URL.revokeObjectURL(preview);
+  const preview = useMemo(() => {
+    if (!photo) return "";
+    return typeof photo === "string" ? photo : URL.createObjectURL(photo);
+  }, [photo]);
+  useEffect(() => {
+    if (!preview.startsWith("blob:")) return undefined;
+    return () => URL.revokeObjectURL(preview);
   }, [preview]);
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -2339,13 +2772,13 @@ function CameraPhotoField({ label, photo, onChange }) {
                 <img src={preview} alt={`${label} capturada`} />
                 <span className="captured-photo-badge"><ArrowUpRight size={12} /> Ampliar</span>
               </button>
-              <div><span>Foto capturada</span><button type="button" className="button-secondary" onClick={() => onChange(null)}>Excluir foto</button><button type="button" className="button-secondary" onClick={openCamera}>Tirar novamente</button></div>
+              <div><span>{readOnly ? "Foto de início registrada" : "Foto capturada"}</span>{!readOnly && <><button type="button" className="button-secondary" onClick={() => onChange(null)}>Excluir foto</button><button type="button" className="button-secondary" onClick={openCamera}>Tirar novamente</button></>}</div>
             </div>
             {previewOpen && preview && (
               <PhotoLightbox photo={preview} label={label} onClose={() => setPreviewOpen(false)} />
             )}
           </>
-        : <button type="button" className="camera-open" onClick={openCamera}><Camera size={21} /><strong>Abrir câmera</strong><small>Use a câmera para capturar a foto</small></button>}
+        : <button type="button" className="camera-open" disabled={disabled} onClick={openCamera}><Camera size={21} /><strong>Abrir câmera</strong><small>{disabled ? "Inicie a limpeza para liberar esta foto." : "Use a câmera para capturar a foto"}</small></button>}
     {error && <span className="field-error">{error}</span>}
   </div>;
 }
@@ -2511,6 +2944,10 @@ function UserForm({ company, sectors, saving, onClose, onSave }) {
   const login = values.username ? `${values.username.toLowerCase()}.${company.company_handle}.routine` : `usuario.${company.company_handle}.routine`;
   async function submit(event) {
     event.preventDefault();
+    if (!values.sector || !sectors.some((sector) => sector.name === values.sector)) {
+      setError("Selecione um setor.");
+      return;
+    }
     setError("");
     try {
       await onSave({ ...values, username: values.username.toLowerCase().trim() });
@@ -2522,7 +2959,7 @@ function UserForm({ company, sectors, saving, onClose, onSave }) {
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="employee-name">Nome completo <span className="required">*</span></label><input id="employee-name" autoFocus required minLength={2} maxLength={120} autoComplete="name" placeholder="Nome do funcionário" value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
       <div className="form-field"><label htmlFor="employee-email">E-mail para recuperação <span className="required">*</span></label><input id="employee-email" type="email" required maxLength={254} autoComplete="email" placeholder="funcionario@empresa.com.br" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} /><small className="field-hint">O link para redefinir a senha será enviado para este endereço.</small></div>
-      <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><select id="employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}><option value="">Selecione um setor</option>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select>{!sectors.length && <small className="field-hint">Cadastre um setor no menu Equipe → Setores antes de incluir funcionários.</small>}</div>
+      <div className="form-field"><label htmlFor="employee-sector">Setor <span className="required">*</span></label><FormDropdown id="employee-sector" required value={values.sector} ariaLabel="Setor" onChange={(value) => setValues((current) => ({ ...current, sector: value }))}><option value="">Selecione um setor</option>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</FormDropdown>{!sectors.length && <small className="field-hint">Cadastre um setor no menu Equipe → Setores antes de incluir funcionários.</small>}</div>
       <div className="form-field"><label htmlFor="employee-username">Identificador de usuário <span className="required">*</span></label><div className="handle-input"><input id="employee-username" required minLength={2} maxLength={30} pattern="[A-Za-z0-9][A-Za-z0-9\-]{1,29}" placeholder="maria" value={values.username} onChange={(event) => setValues({ ...values, username: event.target.value.toLowerCase() })} /><span>.{company.company_handle}.routine</span></div><small className="field-hint">Login completo: <code>{login}</code></small></div>
       <div className="form-field"><label htmlFor="employee-password">Senha inicial <span className="required">*</span></label><input id="employee-password" type="password" required minLength={8} maxLength={128} autoComplete="new-password" placeholder="Mínimo de 8 caracteres" value={values.password} onChange={(event) => setValues({ ...values, password: event.target.value })} /><small className="field-hint">Compartilhe o login e a senha inicial com o funcionário.</small></div>
       <div className="auth-note"><ShieldCheck size={16} /><span>O funcionário só poderá consultar os registros enviados pelo próprio login. A empresa poderá consultar todos.</span></div>
@@ -2537,6 +2974,10 @@ function UserEditForm({ member, sectors, saving, onClose, onSave }) {
   const [error, setError] = useState("");
   async function submit(event) {
     event.preventDefault();
+    if (!values.sector || !sectors.some((sector) => sector.name === values.sector)) {
+      setError("Selecione um setor.");
+      return;
+    }
     setError("");
     try {
       await onSave(values);
@@ -2548,7 +2989,7 @@ function UserEditForm({ member, sectors, saving, onClose, onSave }) {
     <form className="modal-form" onSubmit={submit}>
       <div className="form-field"><label htmlFor="edit-employee-name">Nome completo</label><input id="edit-employee-name" required minLength={2} maxLength={120} value={values.name} onChange={(event) => setValues({ ...values, name: event.target.value })} /></div>
       <div className="form-field"><label htmlFor="edit-employee-email">E-mail para recuperação</label><input id="edit-employee-email" type="email" required maxLength={254} autoComplete="email" value={values.email} onChange={(event) => setValues({ ...values, email: event.target.value })} /></div>
-      <div className="form-field"><label htmlFor="edit-employee-sector">Setor</label><select id="edit-employee-sector" required value={values.sector} onChange={(event) => setValues({ ...values, sector: event.target.value })}>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</select></div>
+      <div className="form-field"><label htmlFor="edit-employee-sector">Setor</label><FormDropdown id="edit-employee-sector" required value={values.sector} ariaLabel="Setor" onChange={(value) => setValues((current) => ({ ...current, sector: value }))}>{sectors.map((sector) => <option key={sector.id} value={sector.name}>{sector.name}</option>)}</FormDropdown></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}Salvar alterações</button></footer>
     </form>
@@ -2628,7 +3069,7 @@ function DashboardPage({ data, loading, locations, history, account, isBoss, onN
       <section className="stats-grid" aria-label="Resumo">
         <StatCard label="Locais cadastrados" value={data?.locations ?? 0} hint="na sua rotina" icon={Leaf} tint="sage" loading={loading} />
         <StatCard label="Limpezas registradas" value={data?.total_cleanings ?? 0} hint="no total" icon={ClipboardCheck} tint="blue" loading={loading} />
-        <StatCard label="Concluídas hoje" value={data?.completed_today ?? 0} hint="com status limpo" icon={CheckCircle2} tint="green" loading={loading} />
+        <StatCard label="Concluídas hoje" value={data?.completed_today ?? 0} hint="com fotos antes e depois" icon={CheckCircle2} tint="green" loading={loading} />
         <StatCard label="Atenção hoje" value={data?.attention_today ?? 0} hint="precisam de cuidado" icon={CircleAlert} tint="amber" loading={loading} />
       </section>
       <div className="dashboard-columns">
@@ -2641,9 +3082,9 @@ function DashboardPage({ data, loading, locations, history, account, isBoss, onN
             <div className="activity-list">
               {data.recent.slice(0, 5).map((record) => (
                 <button className="activity-row" key={record.id} onClick={() => onOpenRecord(history.find((item) => item.id === record.id) || record)}>
-                  <span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={16} /> : <CircleAlert size={16} />}</span>
+                  <span className={`activity-icon ${isCompletedStatus(displayCleaningStatus(record.status)) ? "done" : "attention"}`}>{isCompletedStatus(displayCleaningStatus(record.status)) ? <Check size={16} /> : <CircleAlert size={16} />}</span>
                   <span className="activity-main"><strong>{record.location_name}</strong><small>{record.responsible}{record.notes ? ` · ${record.notes}` : ""}</small></span>
-                  <span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span>
+                  <span className={`status-pill ${statusPillClass(record.status)}`}>{displayCleaningStatus(record.status)}</span>
                   <span className="activity-date">{formatDate(record.cleaning_date)}</span>
                   <ChevronRight size={16} className="row-arrow" />
                 </button>
@@ -2668,7 +3109,7 @@ function StatCard({ label, value, hint, icon: Icon, tint, loading }) {
   return <article className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tint}`}><Icon size={18} /></span></div><div className="stat-number">{loading ? <span className="skeleton-number" /> : value}</div><div className="stat-hint">{hint}</div></article>;
 }
 
-function LocationsPage({ locations, allLocations, sectors, loading, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onAddToSector, onEdit, onView, onAddCleaning }) {
+function LocationsPage({ locations, allLocations, sectors, loading, query, onClearSearch, frequency, setFrequency, responsible, setResponsible, photo, setPhoto, isBoss, onAdd, onAddToSector, onEdit, onView, onAddCleaning }) {
   const [sector, setSector] = useState("");
   const [cleaningType, setCleaningType] = useState("");
   const [itemId, setItemId] = useState("");
@@ -2690,6 +3131,16 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
     (!sector || sameSector(location.responsible_sector, sector))
     && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType)
     && (!itemId || location.id === itemId));
+  const hasFilters = Boolean(query || sector || cleaningType || itemId || responsible || frequency || photo);
+  const clearFilters = () => {
+    setSector("");
+    setCleaningType("");
+    setItemId("");
+    setResponsible("");
+    setFrequency("");
+    setPhoto("");
+    onClearSearch();
+  };
   return (
     <>
       <PageHeading eyebrow="ORGANIZAÇÃO" title="Limpeza" description={isBoss ? "Cadastre os itens que devem ser limpos e organize-os por setor e tipo de limpeza." : "Consulte os itens de limpeza do seu setor e registre as atividades."} action={isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Novo item</button>} />
@@ -2703,7 +3154,7 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
           <FilterDropdown icon={Users} value={responsible} onChange={setResponsible} ariaLabel="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</FilterDropdown>
           <FilterDropdown icon={ImagePlus} value={photo} onChange={setPhoto} ariaLabel="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></FilterDropdown>
         </div>
-        {(sector || cleaningType || itemId || responsible || frequency || photo) && (<button type="button" className="button-secondary clear-filters-btn" onClick={() => { setSector(""); setCleaningType(""); setItemId(""); setResponsible(""); setFrequency(""); setPhoto(""); }}><X size={14} /> Limpar filtros</button>)}
+        <ClearFiltersButton active={hasFilters} onClick={clearFilters} />
         {isBoss && sectorOptions.length > 0 && (
           <div className="sector-quick-add" aria-label="Adicionar item por setor">
             <span>Adicionar equipamento por setor</span>
@@ -2720,12 +3171,16 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
       </div>
       {loading && !allLocations.length ? <LoadingState /> : sectorLocations.length ? (
         <section className="location-grid">
-          {sectorLocations.map((location, index) => (
-            <article className="location-card" key={location.id} style={{ "--card-delay": `${index * 45}ms` }}>
+          {sectorLocations.map((location, index) => {
+            const cardStatus = displayCleaningStatus(
+              location.manual_today_status || location.routine_status || location.last_status,
+            );
+            return (
+              <article className="location-card" key={location.id} style={{ "--card-delay": `${index * 45}ms` }}>
               <div className="location-cover" role="button" tabIndex={0} onClick={() => onView(location)} onKeyDown={(event) => event.key === "Enter" && onView(location)}>
                 {location.photo ? <img src={location.photo} alt={`Foto de ${location.name}`} /> : <div className="cover-placeholder"><Leaf size={27} /><span>{initials(location.name)}</span></div>}
-                <span className={`status-pill cover-status ${location.last_status === "Limpo" ? "status-done" : location.last_status === "Não limpo" ? "status-attention" : "status-neutral"}`}>
-                  {location.last_status || "Sem registros"}
+                <span className={`status-pill cover-status ${statusPillClass(cardStatus)}`}>
+                  {cardStatus || "Sem registros"}
                 </span>
                 {isBoss && <button className="card-edit" onClick={(event) => { event.stopPropagation(); onEdit(location); }} aria-label={`Editar ${location.name}`}><Pencil size={15} /></button>}
               </div>
@@ -2734,8 +3189,9 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
                 <div className="location-meta"><span><Filter size={14} />{location.cleaning_type || "Estrutural"}</span><span><Users size={14} />{location.responsible}</span><span><CalendarDays size={14} />{scheduleDescription(location.schedule_days, location.schedule_time, location.frequency, location.month_week, location.alternate_weeks)}</span></div>
                 <div className="location-card-bottom"><span>{location.cleaning_count === 1 ? "1 registro" : `${location.cleaning_count || 0} registros`} · {formatDate(location.last_cleaned)}</span><button className="text-button compact" onClick={() => onAddCleaning(location)}><Plus size={14} /> Registrar</button></div>
               </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </section>
       ) : (
         <EmptyState className="large-empty" icon={Leaf} title={allLocations.length ? "Nenhum item encontrado" : "Comece cadastrando um item"} description={allLocations.length ? "Tente mudar a busca ou os filtros aplicados." : "Cadastre os itens e associe cada um a um setor e tipo de limpeza."} action={!allLocations.length && isBoss && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Cadastrar primeiro item</button>} />
@@ -2744,51 +3200,119 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
   );
 }
 
-function HistoryPage({ entries, locations, sectors, isBoss, loading, status, setStatus, onAdd, onView }) {
+function HistoryPage({ entries, locations, sectors, isBoss, loading, query, onClearSearch, status, setStatus, onView }) {
+  const [view, setView] = useState("general");
+  const [viewEntries, setViewEntries] = useState(null);
+  const [viewLoading, setViewLoading] = useState(false);
+  const [viewError, setViewError] = useState("");
+  const [retry, setRetry] = useState(0);
   const [sector, setSector] = useState("");
   const [cleaningType, setCleaningType] = useState("");
   const [locationId, setLocationId] = useState("");
+  useEffect(() => {
+    if (isBoss && view === "general") {
+      setViewEntries(null);
+      setViewError("");
+      setViewLoading(false);
+      return undefined;
+    }
+    let active = true;
+    setViewEntries(null);
+    setViewError("");
+    setViewLoading(true);
+    api(`/history?scope=${view}`)
+      .then((rows) => { if (active) setViewEntries(rows); })
+      .catch((error) => { if (active) setViewError(error.message); })
+      .finally(() => { if (active) setViewLoading(false); });
+    return () => { active = false; };
+  }, [isBoss, view, retry]);
+  const sourceEntries = isBoss && view === "general" ? entries : viewEntries || [];
+  const locationOptions = useMemo(() => {
+    const optionsById = new Map(locations.map((location) => [location.id, location]));
+    sourceEntries.forEach((entry) => {
+      if (!entry.location_id || optionsById.has(entry.location_id)) return;
+      optionsById.set(entry.location_id, {
+        id: entry.location_id,
+        name: entry.location_name,
+        responsible_sector: entry.responsible_sector,
+        cleaning_type: entry.cleaning_type,
+      });
+    });
+    return [...optionsById.values()];
+  }, [locations, sourceEntries]);
   const sectorOptions = [...new Set([
-    ...locations.map((location) => location.responsible_sector),
+    ...locationOptions.map((location) => location.responsible_sector),
     ...sectors.map((item) => item.name),
-    ...entries.map((entry) => entry.responsible_sector),
+    ...sourceEntries.map((entry) => entry.responsible_sector),
   ].filter(Boolean))].sort((left, right) => left.localeCompare(right, "pt-BR"));
   const typeOptions = ["Utensílios", "Equipamento", "Estrutural"];
-  const itemOptions = locations.filter((location) =>
+  const itemOptions = locationOptions.filter((location) =>
     (!sector || sameSector(location.responsible_sector, sector))
     && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
-  const filteredEntries = entries.filter((entry) =>
-    (!sector || sameSector(entry.responsible_sector, sector))
-    && (!cleaningType || (entry.cleaning_type || "Estrutural") === cleaningType)
-    && (!locationId || entry.location_id === locationId));
+  const filteredEntries = sourceEntries.filter((entry) => {
+    const matchesQuery = `${entry.location_name} ${entry.responsible} ${entry.executor_name || ""} ${entry.notes || ""}`.toLowerCase().includes(query.toLowerCase());
+    const entryStatus = displayCleaningStatus(entry.status);
+    const matchesStatus = !status
+      || (status === "Concluído" && isCompletedStatus(entryStatus))
+      || entryStatus === status;
+    return matchesQuery
+      && matchesStatus
+      && (!sector || sameSector(entry.responsible_sector, sector))
+      && (!cleaningType || (entry.cleaning_type || "Estrutural") === cleaningType)
+      && (!locationId || entry.location_id === locationId);
+  });
+  const hasFilters = Boolean(query || status || sector || cleaningType || locationId);
+  const clearFilters = () => {
+    setSector("");
+    setCleaningType("");
+    setLocationId("");
+    setStatus("");
+    onClearSearch();
+  };
+  const changeView = (nextView) => {
+    if (nextView === view) return;
+    setView(nextView);
+    setViewEntries(null);
+    setViewError("");
+    setSector("");
+    setCleaningType("");
+    setLocationId("");
+  };
   return (
     <>
-      <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." action={<button className="button-primary" onClick={onAdd} disabled={!locations.length}><Plus size={17} /> Registrar limpeza</button>} />
+      <PageHeading eyebrow="ACOMPANHAMENTO" title="Histórico de limpeza" description="Consulte os registros, status e evidências de cada atividade." />
       <div className="toolbar panel history-toolbar">
         <div className="toolbar-copy"><span className="result-count">{filteredEntries.length}</span><span>{filteredEntries.length === 1 ? "registro" : "registros"}</span></div>
+        <div className={`auth-role-switch history-view-switch ${view === "personal" ? "is-second-selected" : ""}`} role="group" aria-label="Modo de exibição do histórico">
+          <button type="button" className={view === "general" ? "selected" : ""} aria-pressed={view === "general"} onClick={() => changeView("general")}><ClipboardCheck size={16} /> Histórico geral</button>
+          <button type="button" className={view === "personal" ? "selected" : ""} aria-pressed={view === "personal"} onClick={() => changeView("personal")}><Users size={16} /> Seu histórico</button>
+        </div>
         <div className="toolbar-filters cleaning-filters history-filters">
           <FilterDropdown icon={Users} value={sector} onChange={(value) => { setSector(value); setCleaningType(""); setLocationId(""); }} ariaLabel="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectorOptions.map((item) => <option key={item} value={item}>{item}</option>)}</FilterDropdown>
           <FilterDropdown icon={Filter} value={cleaningType} onChange={(value) => { setCleaningType(value); setLocationId(""); }} ariaLabel="Filtrar histórico por tipo de limpeza" disabled={!sector}><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FilterDropdown>
           <FilterDropdown icon={Leaf} value={locationId} onChange={setLocationId} ariaLabel="Filtrar histórico por item a ser limpo" disabled={!cleaningType}><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</FilterDropdown>
-          <FilterDropdown icon={CheckCircle2} value={status} onChange={setStatus} ariaLabel="Filtrar histórico por status"><option value="">Todos os status</option><option value="Feito">Feito</option><option value="Não feito">Não feito</option></FilterDropdown>
+          <FilterDropdown icon={CheckCircle2} value={status} onChange={setStatus} ariaLabel="Filtrar histórico por status"><option value="">Todos os status</option><option value="Pendente">Pendente</option><option value="Iniciado">Iniciado</option><option value="Concluído">Concluído</option><option value="Vencido">Vencido</option></FilterDropdown>
         </div>
+        <ClearFiltersButton active={hasFilters} onClick={clearFilters} />
       </div>
       <section className="panel history-panel">
-        {loading && !entries.length ? <LoadingState /> : filteredEntries.length ? (
+        {viewLoading || (isBoss && view === "general" && loading && !sourceEntries.length) ? <LoadingState /> : viewError ? (
+          <div className="error-banner"><CircleAlert size={18} /><span>{viewError}</span><button onClick={() => setRetry((current) => current + 1)}>Tentar novamente</button></div>
+        ) : filteredEntries.length ? (
           <div className="table-scroll"><table className="history-table">
             <thead><tr><th>A SER LIMPO</th><th>RESPONSÁVEL</th><th>EXECUÇÃO</th><th>SETOR</th><th>DATA E HORA</th><th>STATUS</th><th>EVIDÊNCIAS</th><th aria-label="Abrir" /></tr></thead>
             <tbody>{filteredEntries.map((entry) => <tr key={entry.id} onClick={() => onView(entry)} tabIndex={0} onKeyDown={(event) => event.key === "Enter" && onView(entry)}>
               <td data-label="A ser limpo"><span className="table-location"><span className="table-location-icon"><Leaf size={15} /></span><strong>{entry.location_name}</strong></span></td>
               <td data-label="Responsável"><span className="table-person"><span className="person-initial">{initials(entry.responsible || entry.created_by_name)}</span>{entry.responsible || "—"}</span></td>
-              <td data-label="Execução">{entry.executor_name || (entry.status === "Não feito" ? "—" : entry.created_by_name) || "—"}</td>
+              <td data-label="Execução">{entry.executor_name || (displayCleaningStatus(entry.status) === "Vencido" ? "—" : entry.created_by_name) || "—"}</td>
               <td data-label="Setor">{entry.responsible_sector || "—"}</td>
               <td data-label="Data e hora">{formatDateTime(entry.event_at || entry.created_at)}</td>
-              <td data-label="Status"><span className={`status-pill ${entry.status === "Limpo" || entry.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{entry.status}</span></td>
+              <td data-label="Status"><span className={`status-pill ${statusPillClass(entry.status)}`}><span className="status-dot" />{displayCleaningStatus(entry.status)}</span></td>
               <td data-label="Evidências"><span className="evidence-count"><ImagePlus size={15} />{Number(Boolean(entry.photo_before)) + Number(Boolean(entry.photo_after))}/2 fotos</span></td>
               <td data-label="Abrir"><button className="icon-button table-open" onClick={(event) => { event.stopPropagation(); onView(entry); }} aria-label={`Abrir registro de ${entry.location_name}`}><ChevronRight size={17} /></button></td>
             </tr>)}</tbody>
           </table></div>
-        ) : <EmptyState className="large-empty" icon={ClipboardCheck} title="Ainda não há registros" description={locations.length ? "Registre uma limpeza para começar a montar o histórico." : "Cadastre um local antes de registrar uma limpeza."} action={locations.length > 0 && <button className="button-primary" onClick={onAdd}><Plus size={17} /> Registrar limpeza</button>} />}
+        ) : <EmptyState className="large-empty" icon={ClipboardCheck} title={sourceEntries.length ? "Nenhum registro encontrado" : "Ainda não há registros"} description={sourceEntries.length ? "Ajuste os filtros aplicados para encontrar outros registros." : "Cadastre uma limpeza para começar a montar o histórico."} />}
       </section>
     </>
   );
@@ -2988,7 +3512,7 @@ function LocationForm({ item, initialSector = "", locations, team, sectors, savi
   async function submit(event) {
     event.preventDefault();
     const responsible = sectorTeam.find((member) => member.id === values.responsible_user_id);
-    if (!values.name.trim() || !values.cleaning_type.trim() || !responsible || !values.schedule_days.length
+    if (!sector || !values.name.trim() || !values.cleaning_type.trim() || !responsible || !values.schedule_days.length
       || !SCHEDULE_FREQUENCIES.includes(values.frequency)) {
       setError("Preencha o item, o tipo de limpeza, o responsável, a frequência e ao menos um dia da rotina.");
       return;
@@ -3007,31 +3531,35 @@ function LocationForm({ item, initialSector = "", locations, team, sectors, savi
     <form className="modal-form" onSubmit={submit}>
       <ImageField label="Foto do local" value={values.photo} onChange={(value) => change("photo", value)} allowCamera />
       <div className="form-row">
-        <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><select id="location-sector" required value={sector} onChange={(event) => changeSector(event.target.value)}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><select id="location-cleaning-type" required disabled={!sector} value={values.cleaning_type} onChange={(event) => change("cleaning_type", event.target.value)}><option value="">Selecione um tipo</option>{cleaningTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="location-sector">Setor <span className="required">*</span></label><FormDropdown id="location-sector" required value={sector} ariaLabel="Setor" onChange={changeSector}><option value="">Selecione um setor</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</FormDropdown></div>
+        <div className="form-field"><label htmlFor="location-cleaning-type">Tipo de limpeza <span className="required">*</span></label><FormDropdown id="location-cleaning-type" required disabled={!sector} value={values.cleaning_type} ariaLabel="Tipo de limpeza" onChange={(value) => change("cleaning_type", value)}><option value="">Selecione um tipo</option>{cleaningTypeOptions.map((type) => <option key={type} value={type}>{type}</option>)}</FormDropdown></div>
       </div>
       <div className="form-field"><label htmlFor="location-name">A ser limpo <span className="required">*</span></label><input id="location-name" autoFocus required minLength={1} maxLength={100} placeholder="Ex.: Chão, paredes, bancada" value={values.name} onChange={(event) => change("name", event.target.value)} /></div>
-      <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><select id="location-responsible" required value={values.responsible_user_id} onChange={(event) => change("responsible_user_id", event.target.value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</select></div>
-      <div className="form-field"><label htmlFor="location-frequency">Frequência da rotina <span className="required">*</span></label><select id="location-frequency" required value={values.frequency} onChange={(event) => change("frequency", event.target.value)}>{SCHEDULE_FREQUENCIES.map((frequency) => <option key={frequency} value={frequency}>{frequency}</option>)}</select></div>
-      {values.frequency === "Mensal" && <div className="form-field"><label htmlFor="location-month-week">Semana do mês <span className="required">*</span></label><select id="location-month-week" required value={values.month_week} onChange={(event) => change("month_week", event.target.value)}>{MONTH_WEEKS.map((week) => <option key={week.value} value={week.value}>{week.label}</option>)}</select><small className="field-hint">Ex.: selecione “Última semana” e “Qui” para executar na última quinta-feira de cada mês.</small></div>}
+      <div className="form-field"><label htmlFor="location-responsible">Funcionário responsável <span className="required">*</span></label><FormDropdown id="location-responsible" required value={values.responsible_user_id} ariaLabel="Funcionário responsável" onChange={(value) => change("responsible_user_id", value)}><option value="">Selecione um funcionário</option>{sectorTeam.map((member) => <option key={member.id} value={member.id}>{member.name}</option>)}</FormDropdown></div>
+      <div className="form-field"><label htmlFor="location-frequency">Frequência da rotina <span className="required">*</span></label><FormDropdown id="location-frequency" required value={values.frequency} ariaLabel="Frequência da rotina" onChange={(value) => change("frequency", value)}>{SCHEDULE_FREQUENCIES.map((frequency) => <option key={frequency} value={frequency}>{frequency}</option>)}</FormDropdown></div>
+      {values.frequency === "Mensal" && <div className="form-field"><label htmlFor="location-month-week">Semana do mês <span className="required">*</span></label><FormDropdown id="location-month-week" required value={values.month_week} ariaLabel="Semana do mês" onChange={(value) => change("month_week", value)}>{MONTH_WEEKS.map((week) => <option key={week.value} value={week.value}>{week.label}</option>)}</FormDropdown><small className="field-hint">Ex.: selecione “Última semana” e “Qui” para executar na última quinta-feira de cada mês.</small></div>}
       {values.frequency === "Semanal" && <label className="schedule-alternate"><input type="checkbox" checked={values.alternate_weeks} onChange={(event) => change("alternate_weeks", event.target.checked)} /><span>Executar semana sim, semana não</span></label>}
       <fieldset className="schedule-days-field">
         <legend>{values.frequency === "Mensal" ? "Dias da semana nessa semana do mês" : "Dias da rotina"} <span className="required">*</span></legend>
         <div className="schedule-days">{WEEKDAYS.map((label, day) => <label className={values.schedule_days.includes(day) ? "selected" : ""} key={label}><input type="checkbox" checked={values.schedule_days.includes(day)} onChange={() => toggleDay(day)} /><span>{label}</span></label>)}</div>
         {values.frequency === "Diário" && <small className="field-hint">Selecione os dias em que o serviço deve ser feito. A rotina será criada nesses dias, toda semana.</small>}
       </fieldset>
-      <div className="form-field"><label htmlFor="location-schedule-time">Horário limite <span className="required">*</span></label><input id="location-schedule-time" type="time" required value={values.schedule_time} onChange={(event) => change("schedule_time", event.target.value)} /><small className="field-hint">A tarefa será criada automaticamente para cada dia selecionado. Se não for concluída até esse horário, irá para o histórico como “Não feito”.</small></div>
+      <div className="form-field"><label htmlFor="location-schedule-time">Horário limite <span className="required">*</span></label><input id="location-schedule-time" type="time" required value={values.schedule_time} onChange={(event) => change("schedule_time", event.target.value)} /><small className="field-hint">A tarefa será criada automaticamente para cada dia selecionado. Se não for concluída até esse horário, ficará “Vencido”.</small></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
       <footer className="modal-footer">{item && <button type="button" className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir</button>}<span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Cadastrar item"}</button></footer>
     </form>
   </Modal>;
 }
 
-function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
+function CleaningForm({ item, initial, locations, saving, onClose, onSave, onStart, onComplete }) {
   const initialLocationId = item?.location_id || initial?.location_id || "";
   const initialLocation = locations.find((location) => location.id === initialLocationId);
   const [sector, setSector] = useState(initialLocation?.responsible_sector || "");
   const [cleaningType, setCleaningType] = useState(initialLocation?.cleaning_type || "");
+  const [recordId, setRecordId] = useState(item?.id || null);
+  const [startedAt, setStartedAt] = useState(item?.started_at || "");
+  const [startedOffline, setStartedOffline] = useState(Boolean(item?.started_offline));
+  const [now, setNow] = useState(Date.now());
   const [values, setValues] = useState({
     location_id: initialLocationId,
     cleaning_date: item?.cleaning_date || todayValue(),
@@ -3039,7 +3567,21 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
     photo_after: item?.photo_after || "",
     notes: item?.notes || "",
   });
-  const status = values.photo_before && values.photo_after ? "Limpo" : "Não limpo";
+  const selectedLocation = locations.find((location) => String(location.id) === String(values.location_id));
+  const deadline = item?.deadline
+    || scheduledCleaningDeadline(selectedLocation, values.cleaning_date)?.toISOString()
+    || "";
+  const deadlinePassed = Boolean(deadline && now >= Date.parse(deadline));
+  const isCompleted = Boolean(item?.completed_at) || isCompletedStatus(item?.status);
+  const hasStarted = Boolean(startedAt || item?.status === "Iniciado");
+  const status = isCompleted
+    ? "Concluído"
+    : item?.status === "Vencido" || deadlinePassed
+      ? "Vencido"
+      : hasStarted || values.photo_before
+        ? "Iniciado"
+        : "Pendente";
+  const isEditingExisting = Boolean(item && isCompleted);
   const sectorOptions = [...new Set(locations.map((location) => location.responsible_sector).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right, "pt-BR"));
   const typeOptions = ["Utensílios", "Equipamento", "Estrutural"];
@@ -3048,48 +3590,102 @@ function CleaningForm({ item, initial, locations, saving, onClose, onSave }) {
     && (!cleaningType || (location.cleaning_type || "Estrutural") === cleaningType));
   const [error, setError] = useState("");
   function change(key, value) { setValues((current) => ({ ...current, [key]: value })); }
-  async function submit(event) {
-    event.preventDefault();
-    if (!values.location_id || !values.cleaning_date) {
-      setError("Selecione o local e a data do registro.");
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+
+  async function beginCleaning() {
+    if (!sector || !cleaningType || !values.location_id || !values.cleaning_date) {
+      setError("Selecione o setor, o tipo de limpeza, o local e a data do registro.");
+      return;
+    }
+    if (!values.photo_before) {
+      setError("Adicione a foto de antes para iniciar a limpeza.");
+      return;
+    }
+    if (deadlinePassed) {
+      setError("O prazo desta rotina já venceu.");
       return;
     }
     setError("");
-    await onSave(values, item?.id);
+    try {
+      const result = await onStart(values, recordId);
+      setRecordId(result.id || recordId);
+      setStartedAt(result.started_at || new Date().toISOString());
+      setStartedOffline(Boolean(result.offline));
+      setValues((current) => ({ ...current, photo_before: result.photo_before || current.photo_before }));
+    } catch (startError) {
+      setError(startError.message);
+    }
   }
-  return <Modal title={item ? "Editar registro" : "Registrar limpeza"} subtitle="HISTÓRICO DE ATIVIDADES" onClose={onClose} wide>
+
+  async function submit(event) {
+    event.preventDefault();
+    if (!sector || !cleaningType || !values.location_id || !values.cleaning_date) {
+      setError("Selecione o setor, o tipo de limpeza, o local e a data do registro.");
+      return;
+    }
+    if (status === "Vencido") {
+      setError("O prazo desta rotina venceu. Não é possível concluir este registro.");
+      return;
+    }
+    if (hasStarted && !values.photo_after) {
+      setError("Adicione a foto depois para concluir a atividade.");
+      return;
+    }
+    setError("");
+    if (isEditingExisting) {
+      await onSave(values, item?.id);
+      return;
+    }
+    if (hasStarted) {
+      await onComplete(values, recordId, startedOffline);
+      return;
+    }
+    setError("Adicione a foto de antes e inicie a limpeza antes de registrar.");
+  }
+  const statusMessage = status === "Concluído"
+    ? "Atividade concluída com as fotos antes e depois."
+    : status === "Vencido"
+      ? "O prazo terminou sem conclusão. Este registro está vencido."
+      : status === "Iniciado"
+        ? "Limpeza iniciada. Adicione a foto depois e registre a atividade."
+        : `Pendente até ${deadline ? formatDeadline(deadline) : "o horário limite da rotina"}.`;
+  return <Modal title={isCompleted ? "Editar registro" : hasStarted ? "Continuar limpeza" : item ? "Editar registro" : "Registrar limpeza"} subtitle="HISTÓRICO DE ATIVIDADES" onClose={onClose} wide>
     {!locations.length ? <div className="modal-empty"><Leaf size={24} /><p>Cadastre um item na aba Limpeza antes de registrar uma limpeza.</p><button className="button-secondary" onClick={onClose}>Entendi</button></div> : <form className="modal-form" onSubmit={submit}>
       <div className="form-row">
-        <div className="form-field"><label htmlFor="cleaning-sector">Setor <span className="required">*</span></label><select id="cleaning-sector" required value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); change("location_id", ""); }}><option value="">Selecione um setor</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="cleaning-type">Tipo de limpeza <span className="required">*</span></label><select id="cleaning-type" required disabled={!sector} value={cleaningType} onChange={(event) => { setCleaningType(event.target.value); change("location_id", ""); }}><option value="">Selecione um tipo</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></div>
+        <div className="form-field"><label htmlFor="cleaning-sector">Setor <span className="required">*</span></label><FormDropdown id="cleaning-sector" required disabled={hasStarted} value={sector} ariaLabel="Setor" onChange={(value) => { setSector(value); setCleaningType(""); change("location_id", ""); }}><option value="">Selecione um setor</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FormDropdown></div>
+        <div className="form-field"><label htmlFor="cleaning-type">Tipo de limpeza <span className="required">*</span></label><FormDropdown id="cleaning-type" required disabled={!sector || hasStarted} value={cleaningType} ariaLabel="Tipo de limpeza" onChange={(value) => { setCleaningType(value); change("location_id", ""); }}><option value="">Selecione um tipo</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FormDropdown></div>
       </div>
       <div className="form-row">
-        <div className="form-field"><label htmlFor="cleaning-location">A ser limpo <span className="required">*</span></label><select id="cleaning-location" required disabled={!cleaningType} value={values.location_id} onChange={(event) => change("location_id", event.target.value)}><option value="">Selecione um item</option>{itemOptions.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</select></div>
-        <div className="form-field"><label htmlFor="cleaning-date">Data <span className="required">*</span></label><input id="cleaning-date" type="date" value={values.cleaning_date} onChange={(event) => change("cleaning_date", event.target.value)} /></div>
+        <div className="form-field"><label htmlFor="cleaning-location">A ser limpo <span className="required">*</span></label><FormDropdown id="cleaning-location" required disabled={!cleaningType || hasStarted} value={values.location_id} ariaLabel="A ser limpo" onChange={(value) => change("location_id", value)}><option value="">Selecione um item</option>{itemOptions.map((location) => <option value={location.id} key={location.id}>{location.name}</option>)}</FormDropdown></div>
+        <div className="form-field"><label htmlFor="cleaning-date">Data <span className="required">*</span></label><input id="cleaning-date" type="date" disabled={hasStarted} value={values.cleaning_date} onChange={(event) => change("cleaning_date", event.target.value)} /></div>
       </div>
       <div className="cleaning-auto-status" role="status" aria-live="polite">
-        <span className={`status-pill ${status === "Limpo" ? "status-done" : "status-attention"}`}><span className="status-dot" />{status}</span>
-        <span>{status === "Limpo" ? "As fotos antes e depois foram adicionadas." : "O registro só ficará Limpo após adicionar as duas fotos."}</span>
+        <span className={`status-pill ${statusPillClass(status)}`}><span className="status-dot" />{status}</span>
+        <span>{statusMessage}</span>
       </div>
       <div className="form-row image-fields">
-        <ImageField label="Foto antes (inicial)" value={values.photo_before} onChange={(value) => change("photo_before", value)} />
-        <ImageField label="Foto depois (final)" value={values.photo_after} onChange={(value) => change("photo_after", value)} disabled={!values.photo_before} />
+        <ImageField label="Foto antes (inicial)" value={values.photo_before} onChange={(value) => change("photo_before", value)} disabled={hasStarted} />
+        <ImageField label="Foto depois (final)" value={values.photo_after} onChange={(value) => change("photo_after", value)} disabled={!hasStarted || status === "Vencido"} />
       </div>
       <div className="form-field"><label htmlFor="cleaning-notes">Observações <span className="optional">(opcional)</span></label><textarea id="cleaning-notes" rows="3" maxLength={1000} placeholder="Adicione algum detalhe sobre esta atividade…" value={values.notes} onChange={(event) => change("notes", event.target.value)} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{item ? "Salvar alterações" : "Registrar atividade"}</button></footer>
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button>{!isCompleted && !isEditingExisting && <button type="button" className="button-secondary" disabled={saving || hasStarted || !values.photo_before || deadlinePassed} onClick={beginCleaning}><Camera size={16} />{hasStarted ? "Iniciado" : "Iniciar"}</button>}<button className="button-primary" disabled={saving || (hasStarted && !values.photo_after) || (!hasStarted && !isEditingExisting) || status === "Vencido"}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : isEditingExisting ? "Salvar alterações" : "Registrar atividade"}</button></footer>
     </form>}
   </Modal>;
 }
 
-function RecordDialog({ item, onClose, onDelete }) {
-  const isMissedTask = item.record_type === "task" && item.status === "Não feito";
+function RecordDialog({ item, onClose, onDelete, canDelete }) {
+  const recordStatus = displayCleaningStatus(item.status);
+  const isMissedTask = item.record_type === "task" && recordStatus === "Vencido";
   const activityDate = item.record_type === "task"
     ? item.completed_at || item.missed_at
     : item.event_at || item.created_at;
   return <Modal title={item.record_type === "task" ? "Detalhes da tarefa" : "Detalhes do registro"} subtitle={item.record_type === "task" ? "HISTÓRICO DE TAREFAS" : "HISTÓRICO DE LIMPEZA"} onClose={onClose} wide>
     <div className="record-detail">
-      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"} · Execução: {item.executor_name || item.created_by_name || "—"}</small></div><span className={`status-pill ${item.status === "Limpo" || item.status === "Concluída" ? "status-done" : "status-attention"}`}><span className="status-dot" />{item.status}</span></div>
+      <div className="record-summary"><span className="table-location-icon">{item.record_type === "task" ? <Check size={17} /> : <Leaf size={17} />}</span><div><strong>{item.location_name}</strong><small>Responsável: {item.responsible || "—"} · Execução: {item.executor_name || item.created_by_name || "—"}</small></div><span className={`status-pill ${statusPillClass(recordStatus)}`}><span className="status-dot" />{recordStatus}</span></div>
       <div className="record-date"><CalendarDays size={17} /><span>{isMissedTask ? "Prazo vencido" : item.record_type === "task" ? "Data da conclusão" : "Data da atividade"}</span><strong>{formatDateTime(activityDate)}</strong></div>
       {isMissedTask && item.missed_acknowledged_at && <div className="record-date"><Check size={17} /><span>Ciência registrada</span><strong>{formatDateTime(item.missed_acknowledged_at)}</strong></div>}
       {item.notes && <div className="record-notes"><span>OBSERVAÇÕES</span><p>{item.notes}</p></div>}
@@ -3097,7 +3693,7 @@ function RecordDialog({ item, onClose, onDelete }) {
         <PhotoView label="Foto antes" photo={item.photo_before} />
         <PhotoView label="Foto depois" photo={item.photo_after} />
       </div>
-      <footer className="modal-footer">{item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
+      <footer className="modal-footer">{canDelete && item.record_type !== "task" && <button className="button-danger-ghost" onClick={onDelete}><Trash2 size={16} /> Excluir registro</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button></footer>
     </div>
   </Modal>;
 }
@@ -3155,7 +3751,10 @@ function LocationDialog({ item, records, onClose, onEdit, onRegister, onRecord, 
           )}
           <div className="detail-info-grid"><div><span>A ser limpo</span><strong>{item.name}</strong></div><div><span>Setor</span><strong>{item.responsible_sector || "—"}</strong></div><div><span>Tipo de limpeza</span><strong>{item.cleaning_type || "Estrutural"}</strong></div><div><span>Responsável</span><strong>{item.responsible}</strong></div><div><span>Rotina</span><strong>{scheduleDescription(item.schedule_days, item.schedule_time, item.frequency, item.month_week, item.alternate_weeks)}</strong></div><div><span>Última limpeza</span><strong>{formatDate(item.last_cleaned)}</strong></div></div>
           <div className="detail-history-heading"><div><h3>Histórico de limpeza</h3><p>{records.length} {records.length === 1 ? "registro" : "registros"}</p></div><button className="text-button" onClick={onRegister}><Plus size={15} /> Registrar</button></div>
-          {records.length ? <div className="detail-record-list">{records.map((record) => <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${record.status === "Limpo" ? "done" : "attention"}`}>{record.status === "Limpo" ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${record.status === "Limpo" ? "status-done" : "status-attention"}`}>{record.status}</span><ChevronRight size={16} /></button>)}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
+          {records.length ? <div className="detail-record-list">{records.map((record) => {
+            const recordStatus = displayCleaningStatus(record.status);
+            return <button key={record.id} className="detail-record" onClick={() => onRecord(record)}><span className={`activity-icon ${isCompletedStatus(recordStatus) ? "done" : "attention"}`}>{isCompletedStatus(recordStatus) ? <Check size={15} /> : <CircleAlert size={15} />}</span><span className="activity-main"><strong>{formatDate(record.cleaning_date)}</strong><small>{record.created_by_name || "Equipe"}{record.notes ? ` · ${record.notes}` : ""}</small></span><span className={`status-pill ${statusPillClass(recordStatus)}`}>{recordStatus}</span><ChevronRight size={16} /></button>;
+          })}</div> : <div className="mini-empty">Ainda não existem registros visíveis para este local.</div>}
           <footer className="modal-footer">{isBoss && <button className="button-secondary" onClick={onEdit}><Pencil size={15} /> Editar item</button>}<span className="footer-spacer" /><button className="button-secondary" onClick={onClose}>Fechar</button><button className="button-primary" onClick={onRegister}><Plus size={16} /> Registrar limpeza</button></footer>
         </div>
       </Modal>

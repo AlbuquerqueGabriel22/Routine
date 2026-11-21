@@ -129,9 +129,10 @@ class SyncManager {
     let syncedItems = 0;
     try {
       const items = await getOutboxItems();
+      const startedTaskPhotos = new Map();
       for (const item of items) {
         try {
-          await this.processItem(item);
+          await this.processItem(item, startedTaskPhotos);
           await removeOutboxItem(item.id);
           syncedItems++;
           await this.updatePendingCount();
@@ -189,20 +190,30 @@ class SyncManager {
     }
   }
 
-  async processItem(item) {
+  async processItem(item, startedTaskPhotos = new Map()) {
     const payload = { ...(item.payload || {}) };
     const uploadedPhotoIds = [];
+    let startedTaskPhoto = item.taskId ? startedTaskPhotos.get(String(item.taskId)) : null;
+    if (!startedTaskPhoto && item.type === "TASK_COMPLETE" && item.taskId && item.photoBeforeId) {
+      const tasks = await this.apiClient("/tasks");
+      startedTaskPhoto = tasks.find((task) => String(task.id) === String(item.taskId))?.photo_before || null;
+    }
 
     // 1. Process photoBefore if stored offline
     if (item.photoBeforeId) {
-      const photoRecord = await getOfflinePhoto(item.photoBeforeId);
-      if (photoRecord?.dataUrl) {
-        const file = dataUrlToFile(photoRecord.dataUrl, "photo_before.jpg");
-        const formData = new FormData();
-        formData.append("file", file);
-        const uploadResult = await this.apiClient("/upload", { method: "POST", body: formData });
-        payload.photo_before = uploadResult.url;
+      if (item.type === "TASK_COMPLETE" && startedTaskPhoto) {
+        payload.photo_before = startedTaskPhoto;
         uploadedPhotoIds.push(item.photoBeforeId);
+      } else {
+        const photoRecord = await getOfflinePhoto(item.photoBeforeId);
+        if (photoRecord?.dataUrl) {
+          const file = dataUrlToFile(photoRecord.dataUrl, "photo_before.jpg");
+          const formData = new FormData();
+          formData.append("file", file);
+          const uploadResult = await this.apiClient("/upload", { method: "POST", body: formData });
+          payload.photo_before = uploadResult.url;
+          uploadedPhotoIds.push(item.photoBeforeId);
+        }
       }
     }
 
@@ -241,6 +252,9 @@ class SyncManager {
     }
 
     const result = await this.apiClient(item.endpoint, options);
+    if (item.type === "TASK_START" && item.taskId && result?.photo_before) {
+      startedTaskPhotos.set(String(item.taskId), result.photo_before);
+    }
     // Só liberar os blobs depois que a mutação principal foi confirmada.
     await Promise.all(uploadedPhotoIds.map((id) => deleteOfflinePhoto(id)));
     return result;

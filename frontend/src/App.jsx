@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Children, isValidElement, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -136,6 +136,125 @@ async function api(path, options = {}) {
     throw error;
   }
   return response.status === 204 ? null : response.json();
+}
+
+function FilterDropdown({ id, icon: Icon, value, onChange, ariaLabel, disabled = false, className = "", children }) {
+  const generatedId = useId();
+  const triggerId = id || generatedId;
+  const listId = `${triggerId}-options`;
+  const options = Children.toArray(children)
+    .filter(isValidElement)
+    .map((option) => ({
+      value: String(option.props.value ?? option.props.children),
+      label: option.props.children,
+    }));
+  const selectedIndex = options.findIndex((option) => option.value === String(value ?? ""));
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(Math.max(selectedIndex, 0));
+  const rootRef = useRef(null);
+  const triggerRef = useRef(null);
+  const optionRefs = useRef([]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const closeOnOutsidePointer = (event) => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () => document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) optionRefs.current[activeIndex]?.focus();
+  }, [open, activeIndex]);
+
+  function showOptions(index = selectedIndex) {
+    setActiveIndex(index >= 0 ? index : 0);
+    setOpen(true);
+  }
+
+  function chooseOption(option) {
+    if (!option) return;
+    onChange(option.value);
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
+
+  function handleTriggerKeyDown(event) {
+    if (!["ArrowDown", "ArrowUp", "Enter", " "].includes(event.key)) return;
+    event.preventDefault();
+    if (open && (event.key === "Enter" || event.key === " ")) {
+      chooseOption(options[activeIndex]);
+      return;
+    }
+    showOptions(event.key === "ArrowUp" ? options.length - 1 : selectedIndex);
+  }
+
+  function handleOptionKeyDown(event, index) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      setActiveIndex(Math.max(0, Math.min(options.length - 1, index + direction)));
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      setActiveIndex(event.key === "Home" ? 0 : options.length - 1);
+    } else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      chooseOption(options[index]);
+    } else if (event.key === "Tab") {
+      setOpen(false);
+    }
+  }
+
+  const selectedOption = options[selectedIndex] || options[0];
+  return (
+    <div ref={rootRef} className={`filter-control filter-dropdown ${open ? "is-open" : ""} ${className}`.trim()}>
+      {Icon && <Icon size={15} aria-hidden="true" />}
+      <button
+        ref={triggerRef}
+        id={triggerId}
+        type="button"
+        className="filter-dropdown-trigger"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        disabled={disabled}
+        onClick={() => open ? setOpen(false) : showOptions()}
+        onKeyDown={handleTriggerKeyDown}
+      >
+        <span className="filter-dropdown-value">{selectedOption?.label ?? ""}</span>
+        <ChevronDown size={14} className="filter-dropdown-chevron" aria-hidden="true" />
+      </button>
+      {open && (
+        <div id={listId} className="filter-dropdown-menu" role="listbox" aria-label={ariaLabel}>
+          {options.map((option, index) => {
+            const selected = index === selectedIndex;
+            return (
+              <div
+                key={`${listId}-${index}`}
+                ref={(element) => { optionRefs.current[index] = element; }}
+                id={`${listId}-${index}`}
+                className={`filter-dropdown-option ${selected ? "selected" : ""}`}
+                role="option"
+                aria-selected={selected}
+                tabIndex={activeIndex === index ? 0 : -1}
+                onClick={() => chooseOption(option)}
+                onKeyDown={(event) => handleOptionKeyDown(event, index)}
+              >
+                <span>{option.label}</span>
+                {selected && <Check size={15} aria-hidden="true" />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function formatDate(value) {
@@ -1472,8 +1591,8 @@ function TeamPage({ team, sectors, loading, company, tasks, onManageSectors, onA
       <section className="panel team-panel">
         <div className="section-head"><div><h2>Contas de funcionários</h2><p>Funcionários veem as tarefas e o histórico do próprio setor.</p></div><span className="result-count">{visibleTeam.length}</span></div>
         <div className="toolbar-filters team-filters">
-          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar equipe por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Filter size={15} /><select value={pendingFilter} onChange={(event) => setPendingFilter(event.target.value)} aria-label="Filtrar equipe por pendências"><option value="">Todas as situações</option><option value="pending">Com pendências</option><option value="clear">Sem pendências</option></select><ChevronDown size={14} /></div>
+          <div className="team-filter-field"><label htmlFor="team-sector-filter">Setor</label><FilterDropdown id="team-sector-filter" icon={Users} value={sector} onChange={setSector} ariaLabel="Filtrar equipe por setor"><option value="">Todos os setores</option>{sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</FilterDropdown></div>
+          <div className="team-filter-field"><label htmlFor="team-status-filter">Situação</label><FilterDropdown id="team-status-filter" icon={Filter} value={pendingFilter} onChange={setPendingFilter} ariaLabel="Filtrar equipe por pendências"><option value="">Todas as situações</option><option value="pending">Com pendências</option><option value="clear">Sem pendências</option></FilterDropdown></div>
         </div>
         {loading && !team.length ? <LoadingState /> : visibleTeam.length ? (
           <div className="table-scroll"><table className="history-table team-table"><thead><tr><th>FUNCIONÁRIO</th><th>SETOR</th><th>LOGIN</th><th>E-MAIL DE RECUPERAÇÃO</th><th>DEMANDAS</th><th>CONTA</th></tr></thead><tbody>
@@ -1680,22 +1799,20 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
         </div>
 
         {periodFilter === "Mensal" && (
-          <div className="filter-control month-week-filter">
-            <CalendarDays size={15} />
-            <select
-              value={monthWeekFilter}
-              onChange={(e) => setMonthWeekFilter(e.target.value)}
-              aria-label="Filtrar semana do mês"
-            >
+          <FilterDropdown
+            className="month-week-filter"
+            icon={CalendarDays}
+            value={monthWeekFilter}
+            onChange={setMonthWeekFilter}
+            ariaLabel="Filtrar semana do mês"
+          >
               <option value="all">Todas as semanas</option>
               <option value="1">1ª semana</option>
               <option value="2">2ª semana</option>
               <option value="3">3ª semana</option>
               <option value="4">4ª semana</option>
               <option value="last">Última semana</option>
-            </select>
-            <ChevronDown size={14} />
-          </div>
+          </FilterDropdown>
         )}
 
         <div className="calendar-navigator">
@@ -1712,14 +1829,10 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
         </div>
 
         {isBoss && (
-          <div className="filter-control">
-            <Users size={15} />
-            <select value={sector} onChange={(event) => setSector(event.target.value)} aria-label="Filtrar tarefas por setor">
+          <FilterDropdown icon={Users} value={sector} onChange={setSector} ariaLabel="Filtrar tarefas por setor">
               <option value="">Todos os setores</option>
               {sectors.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
-            </select>
-            <ChevronDown size={14} />
-          </div>
+          </FilterDropdown>
         )}
       </div>
 
@@ -2583,12 +2696,12 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
       <div className="toolbar panel cleaning-toolbar">
         <div className="toolbar-copy"><span className="result-count">{sectorLocations.length}</span><span>{sectorLocations.length === 1 ? "item" : "itens"}</span></div>
         <div className="toolbar-filters cleaning-filters">
-          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); setItemId(""); setResponsible(""); }} aria-label="Filtrar por setor"><option value="">Todos os setores</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Filter size={15} /><select value={cleaningType} disabled={!sector} onChange={(event) => { setCleaningType(event.target.value); setItemId(""); setResponsible(""); }} aria-label="Filtrar por tipo de limpeza"><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Leaf size={15} /><select value={itemId} disabled={!cleaningType} onChange={(event) => setItemId(event.target.value)} aria-label="Filtrar por item a ser limpo"><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Filter size={16} /><select value={frequency} onChange={(event) => setFrequency(event.target.value)} aria-label="Filtrar por frequência"><option value="">Todas as frequências</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Users size={15} /><select value={responsible} onChange={(event) => setResponsible(event.target.value)} aria-label="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><ImagePlus size={15} /><select value={photo} onChange={(event) => setPhoto(event.target.value)} aria-label="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></select><ChevronDown size={14} /></div>
+          <FilterDropdown icon={Users} value={sector} onChange={(value) => { setSector(value); setCleaningType(""); setItemId(""); setResponsible(""); }} ariaLabel="Filtrar por setor"><option value="">Todos os setores</option>{sectorOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Filter} value={cleaningType} onChange={(value) => { setCleaningType(value); setItemId(""); setResponsible(""); }} ariaLabel="Filtrar por tipo de limpeza" disabled={!sector}><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Leaf} value={itemId} onChange={setItemId} ariaLabel="Filtrar por item a ser limpo" disabled={!cleaningType}><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Filter} value={frequency} onChange={setFrequency} ariaLabel="Filtrar por frequência"><option value="">Todas as frequências</option>{FREQUENCIES.map((value) => <option key={value}>{value}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Users} value={responsible} onChange={setResponsible} ariaLabel="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</FilterDropdown>
+          <FilterDropdown icon={ImagePlus} value={photo} onChange={setPhoto} ariaLabel="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></FilterDropdown>
         </div>
         {(sector || cleaningType || itemId || responsible || frequency || photo) && (<button type="button" className="button-secondary clear-filters-btn" onClick={() => { setSector(""); setCleaningType(""); setItemId(""); setResponsible(""); setFrequency(""); setPhoto(""); }}><X size={14} /> Limpar filtros</button>)}
         {isBoss && sectorOptions.length > 0 && (
@@ -2654,10 +2767,10 @@ function HistoryPage({ entries, locations, sectors, isBoss, loading, status, set
       <div className="toolbar panel history-toolbar">
         <div className="toolbar-copy"><span className="result-count">{filteredEntries.length}</span><span>{filteredEntries.length === 1 ? "registro" : "registros"}</span></div>
         <div className="toolbar-filters cleaning-filters history-filters">
-          <div className="filter-control"><Users size={15} /><select value={sector} onChange={(event) => { setSector(event.target.value); setCleaningType(""); setLocationId(""); }} aria-label="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectorOptions.map((item) => <option key={item} value={item}>{item}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Filter size={15} /><select value={cleaningType} disabled={!sector} onChange={(event) => { setCleaningType(event.target.value); setLocationId(""); }} aria-label="Filtrar histórico por tipo de limpeza"><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><Leaf size={15} /><select value={locationId} disabled={!cleaningType} onChange={(event) => setLocationId(event.target.value)} aria-label="Filtrar histórico por item a ser limpo"><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select><ChevronDown size={14} /></div>
-          <div className="filter-control"><CheckCircle2 size={15} /><select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filtrar histórico por status"><option value="">Todos os status</option><option value="Feito">Feito</option><option value="Não feito">Não feito</option></select><ChevronDown size={14} /></div>
+          <FilterDropdown icon={Users} value={sector} onChange={(value) => { setSector(value); setCleaningType(""); setLocationId(""); }} ariaLabel="Filtrar histórico por setor"><option value="">Todos os setores</option>{sectorOptions.map((item) => <option key={item} value={item}>{item}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Filter} value={cleaningType} onChange={(value) => { setCleaningType(value); setLocationId(""); }} ariaLabel="Filtrar histórico por tipo de limpeza" disabled={!sector}><option value="">Todos os tipos</option>{typeOptions.map((value) => <option key={value} value={value}>{value}</option>)}</FilterDropdown>
+          <FilterDropdown icon={Leaf} value={locationId} onChange={setLocationId} ariaLabel="Filtrar histórico por item a ser limpo" disabled={!cleaningType}><option value="">Todos os itens</option>{itemOptions.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</FilterDropdown>
+          <FilterDropdown icon={CheckCircle2} value={status} onChange={setStatus} ariaLabel="Filtrar histórico por status"><option value="">Todos os status</option><option value="Feito">Feito</option><option value="Não feito">Não feito</option></FilterDropdown>
         </div>
       </div>
       <section className="panel history-panel">

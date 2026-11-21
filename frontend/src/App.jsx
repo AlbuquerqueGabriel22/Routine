@@ -25,7 +25,6 @@ import {
   ListChecks,
   LogOut,
   Menu,
-  Moon,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -33,7 +32,6 @@ import {
   Search,
   Settings,
   Sparkles,
-  Sun,
   Trash2,
   Users,
   Wifi,
@@ -179,14 +177,6 @@ function initials(name = "") {
   return name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "—";
 }
 
-function defaultAppearance() {
-  return { theme: "light" };
-}
-
-function appearanceStorageKey(account) {
-  return `routiner-appearance:${account.login}`;
-}
-
 function App() {
   const [account, setAccount] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -267,15 +257,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [page, setPage] = useState("dashboard");
   const [mobileNav, setMobileNav] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
-  const [appearanceOpen, setAppearanceOpen] = useState(false);
-  const [appearance, setAppearance] = useState(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(appearanceStorageKey(account)) || "{}");
-      return { theme: saved.theme === "dark" ? "dark" : "light" };
-    } catch {
-      return defaultAppearance();
-    }
-  });
   const [locations, setLocations] = useState([]);
   const [history, setHistory] = useState([]);
   const [team, setTeam] = useState([]);
@@ -309,14 +290,13 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
   const [syncState, setSyncState] = useState(syncManager.getState());
 
   useEffect(() => {
-    const root = document.documentElement;
-    root.dataset.theme = appearance.theme;
+    document.documentElement.removeAttribute("data-theme");
     try {
-      localStorage.setItem(appearanceStorageKey(account), JSON.stringify(appearance));
-    } catch (error) {
-      setPageError(`Não foi possível salvar as configurações visuais neste dispositivo: ${error.message}`);
+      localStorage.removeItem(`routiner-appearance:${account.login}`);
+    } catch {
+      // A aparência fixa não depende de armazenamento local.
     }
-  }, [account, appearance]);
+  }, [account.login]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -981,7 +961,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
               {profileMenuOpen && (
                 <div className="profile-menu">
                   <div className="profile-menu-heading"><strong>{account.name}</strong><span>{isBoss ? "Administrador da empresa" : account.sector}</span></div>
-                  <button onClick={() => { setProfileMenuOpen(false); setAppearanceOpen(true); }}><Settings size={16} /> Configurações</button>
                   <button onClick={onLogout}><LogOut size={16} /> Sair</button>
                 </div>
               )}
@@ -1151,13 +1130,6 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           saving={saving}
           onClose={() => setModal(null)}
           onSave={(completion) => completeTask(modal.item, completion)}
-        />
-      )}
-      {appearanceOpen && (
-        <AppearanceSettings
-          appearance={appearance}
-          onChange={setAppearance}
-          onClose={() => setAppearanceOpen(false)}
         />
       )}
       {modal?.type === "user" && (
@@ -2031,31 +2003,6 @@ function TaskDeletionHistory({ onClose }) {
         </div>
       ) : <EmptyState icon={Trash2} title="Nenhuma tarefa excluída" description="As tarefas removidas pelos administradores aparecerão aqui com o motivo informado." />}
       <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose}>Fechar</button></footer>
-    </div>
-  </Modal>;
-}
-
-function AppearanceSettings({ appearance, onChange, onClose }) {
-  return <Modal title="Aparência" subtitle="ESCOLHA UM TEMA" onClose={onClose}>
-    <div className="appearance-settings">
-      <div className="appearance-options" role="radiogroup" aria-label="Tema">
-        {[
-          { value: "light", label: "Claro", icon: Sun },
-          { value: "dark", label: "Escuro", icon: Moon },
-        ].map(({ value, label, icon: Icon }) => (
-          <button
-            type="button"
-            key={value}
-            role="radio"
-            aria-checked={appearance.theme === value}
-            className={`appearance-option ${appearance.theme === value ? "selected" : ""}`}
-            onClick={() => onChange((current) => ({ ...current, theme: value }))}
-          >
-            <Icon size={18} /><span>{label}</span>{appearance.theme === value && <CheckCircle2 size={15} />}
-          </button>
-        ))}
-      </div>
-      <footer className="modal-footer"><span className="footer-spacer" /><button className="button-primary" onClick={onClose}>Concluir</button></footer>
     </div>
   </Modal>;
 }

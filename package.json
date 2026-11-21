@@ -1,8 +1,8 @@
 {
   "name": "routiner-desktop",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "private": true,
-  "description": "Aplicativo desktop Routine 3.4 para Windows",
+  "description": "Aplicativo desktop Routine 3.4.1 para Windows",
   "main": "desktop/main.cjs",
   "scripts": {
     "build:web": "npm --prefix frontend run build",

@@ -6,10 +6,11 @@
   text-rendering: optimizeLegibility;
   --ink: #1f2937;
   --muted: #6b7280;
-  --custom-accent: #2563eb;
+  /* Cor principal do aplicativo móvel (ícone e tela de abertura). */
+  --custom-accent: #3f5e4f;
   --green: var(--custom-accent);
-  --green-dark: #1d4ed8;
-  --green-light: #eff6ff;
+  --green-dark: #294536;
+  --green-light: #edf3ef;
   --app-bg: #f7f8fa;
   --panel: #fff;
   --line: #e5e7eb;

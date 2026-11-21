@@ -1836,10 +1836,10 @@ def delete_task(
         if task["missed_at"] is not None:
             raise HTTPException(status_code=409, detail="Tarefas vencidas no histórico não podem ser excluídas.")
         cursor = conn.execute(
-            """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = ?
+            """UPDATE tasks SET deleted_at = ?, deletion_reason = ?, deleted_by_user_id = NULL
                 WHERE id = ? AND company_id = ? AND deleted_at IS NULL
                     AND completed_at IS NULL AND missed_at IS NULL""",
-            (deleted_at, payload.reason, session["account_id"], task_id, session["company_id"]),
+            (deleted_at, payload.reason, task_id, session["company_id"]),
         )
         if cursor.rowcount == 0:
             raise HTTPException(status_code=409, detail="Esta tarefa não pode mais ser excluída.")

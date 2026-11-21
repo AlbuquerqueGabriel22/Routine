@@ -1,6 +1,6 @@
 // IndexedDB wrapper for Routiner Offline-First functionality
 const DB_NAME = "routiner_offline_db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise = null;
 
@@ -32,6 +32,11 @@ export function getDB() {
         // Photos store: local blobs / base64 for photos taken while offline
         if (!db.objectStoreNames.contains("photos")) {
           db.createObjectStore("photos", { keyPath: "id" });
+        }
+
+        // Chave não exportável usada para proteger dados sensíveis da outbox.
+        if (!db.objectStoreNames.contains("crypto")) {
+          db.createObjectStore("crypto", { keyPath: "key" });
         }
       };
 
@@ -132,6 +137,14 @@ export async function saveOfflinePhoto(fileOrBlob) {
   const db = await getDB();
   const id = `photo_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
+  if (typeof fileOrBlob === "string" && fileOrBlob.startsWith("data:")) {
+    const [header, encoded] = fileOrBlob.split(",");
+    const mime = header.match(/data:(.*?);base64/)?.[1] || "image/jpeg";
+    const binary = atob(encoded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    fileOrBlob = new Blob([bytes], { type: mime });
+  }
+
   // Convert to base64 data URL for easy display and serialization
   const dataUrl = await new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -200,10 +213,14 @@ export function dataUrlToFile(dataUrl, filename = "photo.jpg") {
 
 export async function addToOutbox(item) {
   const db = await getDB();
+  const payload = item.payload || {};
+  const encryptedPayload = await encryptOutboxPayload(payload);
   return new Promise((resolve, reject) => {
     const tx = db.transaction("outbox", "readwrite");
     const record = {
       ...item,
+      payload: undefined,
+      payloadEncrypted: encryptedPayload,
       status: "pending",
       retries: 0,
       createdAt: Date.now(),
@@ -220,8 +237,13 @@ export async function getOutboxItems() {
     return new Promise((resolve, reject) => {
       const tx = db.transaction("outbox", "readonly");
       const req = tx.objectStore("outbox").getAll();
-      req.onsuccess = () => {
-        const items = req.result || [];
+      req.onsuccess = async () => {
+        const items = await Promise.all((req.result || []).filter((item) => item.status !== "failed").map(async (item) => ({
+          ...item,
+          payload: item.payloadEncrypted
+            ? await decryptOutboxPayload(item.payloadEncrypted)
+            : (item.payload || {}),
+        })));
         items.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
         resolve(items);
       };
@@ -230,6 +252,47 @@ export async function getOutboxItems() {
   } catch (error) {
     console.warn("Erro ao buscar itens da outbox:", error);
     return [];
+  }
+}
+
+async function getCryptoKey() {
+  const db = await getDB();
+  const existing = await new Promise((resolve, reject) => {
+    const request = db.transaction("crypto", "readonly").objectStore("crypto").get("outbox-key");
+    request.onsuccess = () => resolve(request.result?.value || null);
+    request.onerror = () => reject(request.error);
+  });
+  if (existing) return existing;
+  const key = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction("crypto", "readwrite");
+    tx.objectStore("crypto").put({ key: "outbox-key", value: key });
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  return key;
+}
+
+async function encryptOutboxPayload(payload) {
+  const key = await getCryptoKey();
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(JSON.stringify(payload));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded));
+  return { iv: Array.from(iv), data: Array.from(ciphertext) };
+}
+
+async function decryptOutboxPayload(encrypted) {
+  try {
+    const key = await getCryptoKey();
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: new Uint8Array(encrypted.iv) },
+      key,
+      new Uint8Array(encrypted.data),
+    );
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  } catch (error) {
+    console.error("Não foi possível abrir um item protegido da fila offline.", error);
+    return {};
   }
 }
 
@@ -247,13 +310,33 @@ export async function removeOutboxItem(id) {
   }
 }
 
+export async function markOutboxItemFailed(id, errorMessage) {
+  try {
+    const db = await getDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("outbox", "readwrite");
+      const store = tx.objectStore("outbox");
+      const request = store.get(id);
+      request.onsuccess = () => {
+        if (request.result) {
+          store.put({ ...request.result, status: "failed", errorMessage, failedAt: Date.now() });
+        }
+      };
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (error) {
+    console.warn(`Erro ao marcar outbox [${id}]:`, error);
+  }
+}
+
 export async function countOutboxItems() {
   try {
     const db = await getDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction("outbox", "readonly");
-      const req = tx.objectStore("outbox").count();
-      req.onsuccess = () => resolve(req.result || 0);
+      const req = tx.objectStore("outbox").getAll();
+      req.onsuccess = () => resolve((req.result || []).filter((item) => item.status !== "failed").length);
       req.onerror = () => reject(tx.error);
     });
   } catch {

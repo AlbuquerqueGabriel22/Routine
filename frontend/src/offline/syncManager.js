@@ -4,6 +4,7 @@ import {
   getOfflinePhoto,
   getOutboxItems,
   removeOutboxItem,
+  markOutboxItemFailed,
   dataUrlToFile,
 } from "./db";
 
@@ -135,6 +136,11 @@ class SyncManager {
           syncedItems++;
           await this.updatePendingCount();
         } catch (itemError) {
+          if (itemError?.status >= 400 && itemError.status < 500) {
+            await markOutboxItemFailed(item.id, itemError.message || "Falha de validação no servidor.");
+            await this.updatePendingCount();
+            continue;
+          }
           // If network error during sync, stop and wait for next connection
           if (
             itemError?.name === "ApiConnectionError" ||
@@ -185,6 +191,7 @@ class SyncManager {
 
   async processItem(item) {
     const payload = { ...(item.payload || {}) };
+    const uploadedPhotoIds = [];
 
     // 1. Process photoBefore if stored offline
     if (item.photoBeforeId) {
@@ -195,7 +202,7 @@ class SyncManager {
         formData.append("file", file);
         const uploadResult = await this.apiClient("/upload", { method: "POST", body: formData });
         payload.photo_before = uploadResult.url;
-        await deleteOfflinePhoto(item.photoBeforeId);
+        uploadedPhotoIds.push(item.photoBeforeId);
       }
     }
 
@@ -208,7 +215,7 @@ class SyncManager {
         formData.append("file", file);
         const uploadResult = await this.apiClient("/upload", { method: "POST", body: formData });
         payload.photo_after = uploadResult.url;
-        await deleteOfflinePhoto(item.photoAfterId);
+        uploadedPhotoIds.push(item.photoAfterId);
       }
     }
 
@@ -221,7 +228,7 @@ class SyncManager {
         formData.append("file", file);
         const uploadResult = await this.apiClient("/upload", { method: "POST", body: formData });
         payload.photo_url = uploadResult.url;
-        await deleteOfflinePhoto(item.photoFileId);
+        uploadedPhotoIds.push(item.photoFileId);
       }
     }
 
@@ -233,7 +240,10 @@ class SyncManager {
       options.body = JSON.stringify(payload);
     }
 
-    return await this.apiClient(item.endpoint, options);
+    const result = await this.apiClient(item.endpoint, options);
+    // Só liberar os blobs depois que a mutação principal foi confirmada.
+    await Promise.all(uploadedPhotoIds.map((id) => deleteOfflinePhoto(id)));
+    return result;
   }
 }
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowRight,
   ArrowUpRight,
@@ -81,6 +81,7 @@ function formatDeadline(value) {
 
 function deadlineUrgency(value, now = Date.now()) {
   const remaining = new Date(value).getTime() - now;
+  if (remaining <= 0) return "overdue";
   if (remaining <= 2 * 60 * 60 * 1000) return "urgent";
   if (remaining <= 24 * 60 * 60 * 1000) return "soon";
   if (remaining <= 7 * 24 * 60 * 60 * 1000) return "approaching";
@@ -131,6 +132,9 @@ async function api(path, options = {}) {
     const body = await response.json().catch(() => null);
     const error = new Error(body?.detail || `Não foi possível completar a operação (${response.status}).`);
     error.status = response.status;
+    // O proxy local do Desktop usa 502/503/504 quando o servidor remoto cai.
+    // Esses status devem seguir o mesmo fluxo offline das falhas de conexão.
+    if ([502, 503, 504].includes(response.status)) error.name = "ApiConnectionError";
     throw error;
   }
   return response.status === 204 ? null : response.json();
@@ -510,25 +514,45 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
         }
       }
 
-      // Offline flow
+      // Offline flow: store photos in IndexedDB if present
+      let photoBeforeId = null;
+      let photoAfterId = null;
+      if (values.photo_before && values.photo_before.startsWith("data:")) {
+        const saved = await saveOfflinePhoto(values.photo_before);
+        photoBeforeId = saved.id;
+      }
+      if (values.photo_after && values.photo_after.startsWith("data:")) {
+        const saved = await saveOfflinePhoto(values.photo_after);
+        photoAfterId = saved.id;
+      }
+
       await addToOutbox({
         type: "HISTORY_CREATE",
         endpoint: "/history",
         method: "POST",
-        payload: values,
+        payload: {
+          ...values,
+          photo_before: photoBeforeId ? "" : (values.photo_before || ""),
+          photo_after: photoAfterId ? "" : (values.photo_after || ""),
+        },
+        photoBeforeId,
+        photoAfterId,
       });
-      const loc = locations.find((l) => l.id === Number(values.location_id));
+
+      const loc = locations.find((l) => String(l.id) === String(values.location_id));
       const newEntry = {
         id: `offline_${Date.now()}`,
         location_id: values.location_id,
         location_name: loc?.name || "Item de limpeza",
         cleaning_date: values.cleaning_date || localDateValue(new Date()),
         cleaning_type: values.cleaning_type || "Estrutural",
-        status: values.status || "Limpo",
+        status: values.status || (values.photo_before && values.photo_after ? "Limpo" : "Não limpo"),
         notes: values.notes || "",
         responsible: loc?.responsible || account.name || account.login,
         created_by_name: account.name || account.login,
         created_at: new Date().toISOString(),
+        photo_before: values.photo_before || "",
+        photo_after: values.photo_after || "",
       };
       const updatedHistory = [newEntry, ...history];
       setHistory(updatedHistory);
@@ -789,14 +813,45 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
 
   const unreadNotifications = notifications.filter((item) => !item.read_at).length;
 
+  async function queueDelete(kind, id) {
+    const isOfflineId = String(id).startsWith("offline_");
+    if (syncState.isOnline && !isOfflineId) {
+      try {
+        await api(`/${kind}/${id}`, { method: "DELETE" });
+        return false;
+      } catch (error) {
+        if (error?.name !== "ApiConnectionError" && !error?.message?.includes("Failed to fetch")) throw error;
+      }
+    }
+    if (!isOfflineId) {
+      await addToOutbox({
+        type: `${kind.toUpperCase()}_DELETE`,
+        endpoint: `/${kind}/${id}`,
+        method: "DELETE",
+        payload: {},
+      });
+    }
+    if (kind === "locations") {
+      const updated = locations.filter((item) => String(item.id) !== String(id));
+      setLocations(updated);
+      await saveCache("locations", updated);
+    } else {
+      const updated = history.filter((item) => String(item.id) !== String(id));
+      setHistory(updated);
+      await saveCache("history", updated);
+    }
+    await syncManager.updatePendingCount();
+    return true;
+  }
+
   async function removeItem(kind, id) {
     const label = kind === "locations" ? "este local e todo o histórico relacionado" : "este registro";
     if (!window.confirm(`Tem certeza de que deseja excluir ${label}? Esta ação não pode ser desfeita.`)) return;
     try {
-      await api(`/${kind}/${id}`, { method: "DELETE" });
+      const offlineDeleted = await queueDelete(kind, id);
       setModal(null);
       setToast(kind === "locations" ? "Local excluído." : "Registro excluído.");
-      await refresh();
+      if (!offlineDeleted) await refresh();
     } catch (error) {
       setToast(error.message);
     }
@@ -1114,10 +1169,38 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onSave={async (values) => {
             setSaving(true);
             try {
-              const created = await api("/users", { method: "POST", body: JSON.stringify(values) });
+              if (syncState.isOnline) {
+                try {
+                  const created = await api("/users", { method: "POST", body: JSON.stringify(values) });
+                  setModal(null);
+                  setToast(`Conta criada: ${created.login}`);
+                  await refresh();
+                  return;
+                } catch (netErr) {
+                  if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+                }
+              }
+
+              // Offline flow
+              await addToOutbox({
+                type: "USER_CREATE",
+                endpoint: "/users",
+                method: "POST",
+                payload: values,
+              });
+              const newMember = {
+                id: `offline_${Date.now()}`,
+                name: values.name,
+                login: values.username || values.name.toLowerCase().replace(/\s+/g, "."),
+                sector: values.sector,
+                active: true,
+              };
+              const updatedTeam = [...team, newMember];
+              setTeam(updatedTeam);
+              await saveCache("team", updatedTeam);
+              await syncManager.updatePendingCount();
               setModal(null);
-              setToast(`Conta criada: ${created.login}`);
-              await refresh();
+              setToast("Funcionário cadastrado offline. Será sincronizado ao conectar à internet.");
             } catch (error) {
               throw error;
             } finally {
@@ -1135,10 +1218,31 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onSave={async (values) => {
             setSaving(true);
             try {
-              await api(`/users/${modal.item.id}`, { method: "PUT", body: JSON.stringify(values) });
+              if (syncState.isOnline) {
+                try {
+                  await api(`/users/${modal.item.id}`, { method: "PUT", body: JSON.stringify(values) });
+                  setModal(null);
+                  setToast("Funcionário atualizado.");
+                  await refresh();
+                  return;
+                } catch (netErr) {
+                  if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+                }
+              }
+
+              // Offline flow
+              await addToOutbox({
+                type: "USER_UPDATE",
+                endpoint: `/users/${modal.item.id}`,
+                method: "PUT",
+                payload: values,
+              });
+              const updatedTeam = team.map((member) => member.id === modal.item.id ? { ...member, ...values } : member);
+              setTeam(updatedTeam);
+              await saveCache("team", updatedTeam);
+              await syncManager.updatePendingCount();
               setModal(null);
-              setToast("Funcionário atualizado.");
-              await refresh();
+              setToast("Funcionário atualizado offline. Será sincronizado ao conectar.");
             } catch (error) {
               throw error;
             } finally {
@@ -1155,9 +1259,29 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onAdd={async (name) => {
             setSaving(true);
             try {
-              await api("/sectors", { method: "POST", body: JSON.stringify({ name }) });
-              setToast("Setor cadastrado.");
-              await refresh();
+              if (syncState.isOnline) {
+                try {
+                  await api("/sectors", { method: "POST", body: JSON.stringify({ name }) });
+                  setToast("Setor cadastrado.");
+                  await refresh();
+                  return;
+                } catch (netErr) {
+                  if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+                }
+              }
+
+              // Offline flow
+              await addToOutbox({
+                type: "SECTOR_CREATE",
+                endpoint: "/sectors",
+                method: "POST",
+                payload: { name },
+              });
+              const updatedSectors = [...sectors, { id: `offline_${Date.now()}`, name, employee_count: 0, location_count: 0 }];
+              setSectors(updatedSectors);
+              await saveCache("sectors", updatedSectors);
+              await syncManager.updatePendingCount();
+              setToast("Setor salvo offline. Será sincronizado ao conectar.");
             } finally {
               setSaving(false);
             }
@@ -1165,9 +1289,29 @@ function Workspace({ account, onLogout, installPrompt, onInstall }) {
           onDelete={async (sector) => {
             setSaving(true);
             try {
-              await api(`/sectors/${sector.id}`, { method: "DELETE" });
-              setToast("Setor excluído.");
-              await refresh();
+              if (syncState.isOnline) {
+                try {
+                  await api(`/sectors/${sector.id}`, { method: "DELETE" });
+                  setToast("Setor excluído.");
+                  await refresh();
+                  return;
+                } catch (netErr) {
+                  if (netErr?.name !== "ApiConnectionError" && !netErr?.message?.includes("Failed to fetch")) throw netErr;
+                }
+              }
+
+              // Offline flow
+              await addToOutbox({
+                type: "SECTOR_DELETE",
+                endpoint: `/sectors/${sector.id}`,
+                method: "DELETE",
+                payload: {},
+              });
+              const updatedSectors = sectors.filter((s) => s.id !== sector.id);
+              setSectors(updatedSectors);
+              await saveCache("sectors", updatedSectors);
+              await syncManager.updatePendingCount();
+              setToast("Setor excluído offline. Será sincronizado ao conectar.");
             } finally {
               setSaving(false);
             }
@@ -1514,7 +1658,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
     <>
       <PageHeading
         eyebrow={isBoss ? "GESTÃO DA EQUIPE" : "SUA ROTINA"}
-        title="Tarefas com prazo"
+        title="Lista de Tarefas"
         description={isBoss
           ? "Acompanhe as rotinas no calendário, filtre por frequência e gerencie a execução da equipe."
           : "Veja suas tarefas em lista ou calendário, organizadas por dia, semana ou mês."}
@@ -1539,7 +1683,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
             {isBoss && (
               <>
                 <button className="button-secondary" onClick={onDeletionHistory}><Trash2 size={16} /> Exclusões</button>
-                <button className="button-primary" onClick={onCreate}><Plus size={17} /> Nova tarefa</button>
+                <button className="button-primary" onClick={onCreate}><Plus size={17} /> Tarefa extra</button>
               </>
             )}
           </div>
@@ -1681,15 +1825,15 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
               const urgency = deadlineUrgency(task.deadline, now);
               return (
                 <article className="panel task-card" key={task.id}>
-                  <div className={`task-alert ${urgency}`} aria-label={urgency === "urgent" ? "Prazo urgente" : "Prazo da tarefa"}>
+                  <div className={`task-alert ${urgency}`} aria-label={urgency === "overdue" ? "Prazo vencido" : urgency === "urgent" ? "Prazo urgente" : "Prazo da tarefa"}>
                     <CircleAlert size={19} />
                   </div>
                   <div className="task-content">
                     <div className="task-title-row">
                       <h3>{task.title}</h3>
-                      <span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>
+                      {urgency === "overdue" ? <span className="status-pill status-overdue">Vencido</span> : <span className={`status-pill ${task.acknowledged_at ? "status-done" : "status-attention"}`}>
                         {task.acknowledged_at ? "Ciente" : "Aguardando ciência"}
-                      </span>
+                      </span>}
                     </div>
                     {task.description && <p className="task-description">{task.description}</p>}
                     <div className="task-meta">
@@ -1704,12 +1848,18 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
                   )}
                   {isBoss && (
                     <div className="task-admin-actions">
-                      <button className="button-secondary task-complete" onClick={() => onEdit(task)}>
-                        <Pencil size={15} /> Editar demanda
-                      </button>
-                      <button className="button-danger-ghost task-complete" onClick={() => onDelete(task)}>
-                        <Trash2 size={15} /> Excluir
-                      </button>
+                      {urgency === "overdue" ? (
+                        <span className="field-hint">O prazo venceu; a tarefa será registrada no histórico.</span>
+                      ) : (
+                        <>
+                          <button className="button-secondary task-complete" onClick={() => onEdit(task)}>
+                            <Pencil size={15} /> Editar demanda
+                          </button>
+                          <button className="button-danger-ghost task-complete" onClick={() => onDelete(task)}>
+                            <Trash2 size={15} /> Excluir
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </article>
@@ -1722,7 +1872,7 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
             icon={ListChecks}
             title={periodFilter === "Diário" ? "Nenhuma tarefa pendente para esta data" : `Nenhuma tarefa pendente neste filtro (${periodFilter})`}
             description={isBoss ? "As tarefas programadas aparecerão na data prevista. Você também pode criar uma tarefa avulsa." : "As tarefas programadas aparecerão aqui no dia previsto para execução."}
-            action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa</button>}
+            action={isBoss && <button className="button-primary" onClick={onCreate}><Plus size={16} /> Criar tarefa extra</button>}
           />
         )}
       </section>
@@ -1738,14 +1888,14 @@ function TasksPage({ tasks, loading, isBoss, sectors, now, onCreate, onEdit, onD
           <div className="task-list">
             {completed.map((task) => (
               <article className="panel task-card task-card-complete" key={task.id}>
-                <span className={`task-alert ${task.missed_at ? "urgent" : "completed"}`}>
+                <span className={`task-alert ${task.missed_at ? "overdue" : "completed"}`}>
                   {task.missed_at ? <CircleAlert size={18} /> : <Check size={18} />}
                 </span>
                 <div className="task-content">
                   <div className="task-title-row">
                     <h3>{task.title}</h3>
-                    <span className={`status-pill ${task.missed_at ? "status-attention" : "status-done"}`}>
-                      {task.missed_at ? "Não feito" : "Concluída"}
+                    <span className={`status-pill ${task.missed_at ? "status-overdue" : "status-done"}`}>
+                      {task.missed_at ? "Vencido" : "Concluída"}
                     </span>
                   </div>
                   <div className="task-meta">
@@ -1804,7 +1954,7 @@ function TaskForm({ item, team, saving, onClose, onSave }) {
     }
   }
 
-  return <Modal title={item ? "Editar tarefa" : "Nova tarefa"} subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
+  return <Modal title={item ? "Editar tarefa" : "Tarefa extra"} subtitle="ATRIBUIÇÃO COM PRAZO" onClose={onClose}>
     <form className="modal-form" onSubmit={submit}>
       {item
         ? <div className="task-edit-summary"><strong>{item.title}</strong>{item.description && <p>{item.description}</p>}<small>O nome e os detalhes da tarefa não podem ser editados.</small></div>
@@ -1915,6 +2065,24 @@ function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
   const [photoAfter, setPhotoAfter] = useState(null);
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
+  const [startedAt, setStartedAt] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
+  const isOverdue = new Date(task.deadline).getTime() <= Date.now();
+  const canSubmit = photoBefore && photoAfter;
+  const canRegister = canSubmit || isOverdue;
+
+  useEffect(() => {
+    if (!startedAt) return;
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+
+  function formatElapsed(secs) {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+
   async function submit(event) {
     event.preventDefault();
     if (isSubstitute && !notes.trim()) {
@@ -1928,16 +2096,31 @@ function TaskExecutionForm({ task, isSubstitute, saving, onClose, onSave }) {
     setError("");
     await onSave({ photo_before: photoBefore, photo_after: photoAfter, notes });
   }
+
   return <Modal title="Fazer tarefa" subtitle="EXECUÇÃO DA TAREFA" onClose={onClose} wide>
     <form className="modal-form task-execution-form" onSubmit={submit}>
       <div className="task-execution-summary"><strong>{task.title}</strong><span>{task.description || "Registre a execução da tarefa atribuída."}</span><small>Prazo: {formatDeadline(task.deadline)}</small></div>
+      {!startedAt && !photoBefore && (
+        <div className="task-start-action">
+          <button type="button" className="button-primary task-start-btn" onClick={() => { setStartedAt(Date.now()); }}>
+            <Camera size={18} /> Iniciar limpeza
+          </button>
+          <small className="field-hint">Clique para registrar o início e tirar a foto de antes.</small>
+        </div>
+      )}
+      {(startedAt || photoBefore) && (
+        <div className="task-status-banner">
+          <span className="status-pill status-attention">Iniciado</span>
+          {startedAt && <span className="task-elapsed"><Clock3 size={13} /> Em execução: {formatElapsed(elapsed)}</span>}
+        </div>
+      )}
       <div className="task-photo-grid">
-        <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={setPhotoBefore} />
-        <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} />
+        <CameraPhotoField label="Foto antes" photo={photoBefore} onChange={(file) => { setPhotoBefore(file); if (!startedAt) setStartedAt(Date.now()); }} autoOpen={startedAt && !photoBefore} />
+        <CameraPhotoField label="Foto depois" photo={photoAfter} onChange={setPhotoAfter} disabled={!photoBefore} />
       </div>
       <div className="form-field"><label htmlFor="task-completion-notes">{isSubstitute ? <>Por que você está executando a tarefa de {task.assignee_name}? <span className="required">*</span></> : "Observações (opcional)"}</label><textarea id="task-completion-notes" required={isSubstitute} maxLength={1000} rows={3} placeholder={isSubstitute ? "Descreva o motivo da execução por outra pessoa…" : "Adicione uma observação (opcional)"} value={notes} onChange={(event) => { setNotes(event.target.value); setError(""); }} /></div>
       {error && <div className="form-error"><CircleAlert size={16} />{error}</div>}
-      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Concluir tarefa"}</button></footer>
+      <footer className="modal-footer"><span className="footer-spacer" /><button type="button" className="button-secondary" onClick={onClose} disabled={saving}>Cancelar</button><button className="button-primary" disabled={saving || !canRegister}>{saving && <LoaderCircle size={16} className="spin" />}{saving ? "Salvando…" : "Registrar"}</button></footer>
     </form>
   </Modal>;
 }
@@ -2460,6 +2643,7 @@ function LocationsPage({ locations, allLocations, sectors, loading, frequency, s
           <div className="filter-control"><Users size={15} /><select value={responsible} onChange={(event) => setResponsible(event.target.value)} aria-label="Filtrar por responsável"><option value="">Todos responsáveis</option>{responsibleOptions.map((value) => <option key={value}>{value}</option>)}</select><ChevronDown size={14} /></div>
           <div className="filter-control"><ImagePlus size={15} /><select value={photo} onChange={(event) => setPhoto(event.target.value)} aria-label="Filtrar por foto"><option value="">Todas as fotos</option><option value="with">Com foto</option><option value="without">Sem foto</option></select><ChevronDown size={14} /></div>
         </div>
+        {(sector || cleaningType || itemId || responsible || frequency || photo) && (<button type="button" className="button-secondary clear-filters-btn" onClick={() => { setSector(""); setCleaningType(""); setItemId(""); setResponsible(""); setFrequency(""); setPhoto(""); }}><X size={14} /> Limpar filtros</button>)}
         {isBoss && sectorOptions.length > 0 && (
           <div className="sector-quick-add" aria-label="Adicionar item por setor">
             <span>Adicionar equipamento por setor</span>
